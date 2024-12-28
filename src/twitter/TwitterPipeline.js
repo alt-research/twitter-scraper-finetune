@@ -763,7 +763,7 @@ async saveCookies() {
       }
 
       // Show sample tweets
-      await this.showSampleTweets(allTweets);
+      // await this.showSampleTweets(allTweets);
 
       // Cleanup
       await this.cleanup();
