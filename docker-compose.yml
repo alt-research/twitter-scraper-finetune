@@ -9,6 +9,11 @@ services:
       - PORT=3000
       - HOST=0.0.0.0
       - NODE_ENV=production
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USERNAME=postgres
+      - DB_PASSWORD=postgres
+      - DB_DATABASE=twitter_scraper
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=
@@ -18,10 +23,11 @@ services:
       - MAX_RETRIES=5
       - DEBUG=false
     volumes:
-      - ./pipeline:/usr/src/app/pipeline
+      - ./data:/usr/src/app/data
       - ./cookies:/usr/src/app/cookies
     depends_on:
       - redis
+      - postgres
     restart: unless-stopped
 
   redis:
@@ -33,5 +39,18 @@ services:
     restart: unless-stopped
     command: redis-server --appendonly yes
 
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=twitter_scraper
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
 volumes:
-  redis-data: 
+  redis-data:
+  postgres-data: 

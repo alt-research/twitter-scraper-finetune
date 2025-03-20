@@ -78,7 +78,7 @@ async function twitterRoutes(fastify, options) {
     return result;
   });
 
-  // Submit a tweet processing job
+  // Submit a tweet processing job for analytics
   fastify.post('/process', {
     schema: {
       body: {
@@ -86,7 +86,6 @@ async function twitterRoutes(fastify, options) {
         required: ['username', 'action'],
         properties: {
           username: { type: 'string', minLength: 1 },
-          basePath: { type: 'string', default: 'pipeline' },
           action: { 
             type: 'string', 
             enum: ['generate-analytics', 'generate-finetuning'] 
@@ -99,58 +98,73 @@ async function twitterRoutes(fastify, options) {
       }
     }
   }, async (request, reply) => {
-    const { username, basePath, action, tweets } = request.body;
-    
-    // If tweets are not provided, try to load them from the file
-    let tweetsToProcess = tweets;
-    if (!tweetsToProcess) {
-      try {
-        // Import file system dynamically
-        const fs = await import('fs/promises');
-        const path = await import('path');
-        
-        // Import DataOrganizer to get paths
-        const { default: DataOrganizer } = await import('../../src/twitter/DataOrganizer.js');
-        const organizer = new DataOrganizer(basePath || 'pipeline', username);
-        const paths = organizer.getPaths();
-        
-        // Read tweets from file
-        const rawTweetsData = await fs.readFile(paths.raw.tweets, 'utf-8');
-        tweetsToProcess = JSON.parse(rawTweetsData);
-      } catch (error) {
-        fastify.log.error(`Failed to load tweets for processing: ${error.message}`);
-        reply.code(400);
-        return { error: 'Could not load tweets from file. Please provide tweets in the request body' };
+    try {
+      const { username, action, tweets } = request.body;
+      return await twitterService.queueProcessJob(username, action, tweets);
+    } catch (error) {
+      fastify.log.error(`Failed to process tweets: ${error.message}`);
+      reply.code(400);
+      return { error: error.message };
+    }
+  });
+
+  // Get tweets for a user with pagination and filters
+  fastify.get('/tweets/:username', {
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          username: { type: 'string' }
+        },
+        required: ['username']
+      },
+      querystring: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          offset: { type: 'integer', minimum: 0, default: 0 },
+          type: { type: 'string', enum: ['original', 'reply', 'retweet', 'quote'] },
+          sortBy: { type: 'string', enum: ['postedAt', 'likeCount', 'retweetCount', 'replyCount', 'quoteCount'], default: 'postedAt' },
+          sortOrder: { type: 'string', enum: ['ASC', 'DESC'], default: 'DESC' },
+          startDate: { type: 'string', format: 'date-time' },
+          endDate: { type: 'string', format: 'date-time' }
+        }
       }
     }
-    
-    return await twitterService.queueProcessJob(username, action, basePath, tweetsToProcess);
+  }, async (request, reply) => {
+    try {
+      const { username } = request.params;
+      const { limit, offset, type, sortBy, sortOrder, startDate, endDate } = request.query;
+      
+      const tweets = await twitterService.getUserTweets(username, {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        type,
+        sortBy,
+        sortOrder,
+        startDate: startDate ? new Date(startDate) : null,
+        endDate: endDate ? new Date(endDate) : null
+      });
+      
+      return tweets;
+    } catch (error) {
+      fastify.log.error(`Failed to get tweets: ${error.message}`);
+      reply.code(404);
+      return { error: error.message };
+    }
   });
 
   // Get tweet analytics (if available)
   fastify.get('/analytics/:username', async (request, reply) => {
-    const { username } = request.params;
-    
     try {
-      // Import file system dynamically
-      const fs = await import('fs/promises');
-      
-      // Import DataOrganizer to get paths
-      const { default: DataOrganizer } = await import('../../src/twitter/DataOrganizer.js');
-      const organizer = new DataOrganizer('pipeline', username);
-      const paths = organizer.getPaths();
-      
-      // Try to read analytics file
-      const analyticsData = await fs.readFile(paths.analytics.stats, 'utf-8');
-      const analytics = JSON.parse(analyticsData);
-      
-      return analytics;
+      const { username } = request.params;
+      return await twitterService.getUserAnalytics(username);
     } catch (error) {
       fastify.log.error(`Failed to get analytics for @${username}: ${error.message}`);
       reply.code(404);
       return { 
-        error: 'Analytics not found', 
-        message: 'Run a scraping job first and then process the tweets with analytics'
+        error: error.message, 
+        message: 'Analytics not found. Run a scraping job first and then process the tweets with analytics'
       };
     }
   });

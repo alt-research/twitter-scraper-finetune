@@ -6,6 +6,8 @@ class TwitterService {
     this.fastify = fastify;
     this.redis = fastify.redis;
     this.queues = fastify.queues;
+    this.db = fastify.db;
+    this.repositories = fastify.repositories;
   }
 
   /**
@@ -31,13 +33,17 @@ class TwitterService {
       };
     }
 
+    // Store or update the user in database
+    await this.ensureUserExists(username);
+
     // Add job to queue
     const job = await this.queues.twitterScraper.add(
       'scrape-twitter-user',
       { 
         username, 
         options,
-        operation: 'scrape-twitter-user'
+        operation: 'scrape-twitter-user',
+        storeInDatabase: true // Flag to indicate we want to store in database
       },
       { 
         jobId: `twitter-${username}-${Date.now()}`,
@@ -54,22 +60,65 @@ class TwitterService {
   }
 
   /**
-   * Submit a job to process tweets
+   * Ensure the user exists in the database
+   * 
+   * @param {string} username - Twitter username
+   * @returns {Object} - User entity
+   */
+  async ensureUserExists(username) {
+    try {
+      // Try to find existing user
+      let user = await this.repositories.user.findOne({ 
+        where: { username } 
+      });
+
+      // Create user if not found
+      if (!user) {
+        user = this.repositories.user.create({
+          username,
+          lastScrapedAt: new Date(),
+        });
+        await this.repositories.user.save(user);
+        this.fastify.log.info(`Created new user record for @${username}`);
+      } else {
+        // Update last scraped time
+        user.lastScrapedAt = new Date();
+        await this.repositories.user.save(user);
+        this.fastify.log.info(`Updated existing user record for @${username}`);
+      }
+
+      return user;
+    } catch (error) {
+      this.fastify.log.error(`Failed to ensure user exists: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Submit a job to process tweets for analytics
    * 
    * @param {string} username - Twitter username 
    * @param {string} action - Processing action
-   * @param {string} basePath - Base path for data storage
-   * @param {Array} tweets - Optional array of tweets
+   * @param {Array} tweets - Optional array of tweets (if not provided, will fetch from DB)
    * @returns {Object} - Job information
    */
-  async queueProcessJob(username, action, basePath = 'pipeline', tweets = null) {
+  async queueProcessJob(username, action, tweets = null) {
+    // Find user in database
+    const user = await this.repositories.user.findOne({ 
+      where: { username } 
+    });
+
+    if (!user) {
+      throw new Error(`User @${username} not found. Please run a scraping job first.`);
+    }
+
     // Add job to queue
     const job = await this.queues.tweetProcessor.add(
       `process-${action}`,
       { 
         username, 
-        basePath, 
-        action, 
+        userId: user.id,
+        action,
         tweets 
       },
       { 
@@ -83,6 +132,30 @@ class TwitterService {
       jobId: job.id,
       status: 'queued'
     };
+  }
+
+  /**
+   * Get analytics for a user
+   * 
+   * @param {string} username - Twitter username
+   * @returns {Object} - Analytics data
+   */
+  async getUserAnalytics(username) {
+    // Find user in database
+    const user = await this.repositories.user.findOne({ 
+      where: { username },
+      relations: ['analytics'] 
+    });
+
+    if (!user) {
+      throw new Error(`User @${username} not found`);
+    }
+
+    if (!user.analytics) {
+      throw new Error(`No analytics found for @${username}. Please run a processing job first.`);
+    }
+
+    return user.analytics;
   }
 
   /**
@@ -145,6 +218,68 @@ class TwitterService {
       progress: job.progress,
       attemptsMade: job.attemptsMade,
       result: job.returnvalue
+    };
+  }
+
+  /**
+   * Get tweets for a user
+   * 
+   * @param {string} username - Twitter username
+   * @param {Object} options - Query options (limit, offset, type, etc.)
+   * @returns {Object} - Tweets with pagination info
+   */
+  async getUserTweets(username, options = {}) {
+    const {
+      limit = 20,
+      offset = 0,
+      type = null,
+      sortBy = 'postedAt',
+      sortOrder = 'DESC',
+      startDate = null,
+      endDate = null,
+    } = options;
+
+    // Find user in database
+    const user = await this.repositories.user.findOne({ 
+      where: { username } 
+    });
+
+    if (!user) {
+      throw new Error(`User @${username} not found`);
+    }
+
+    // Build query
+    const queryBuilder = this.repositories.tweet
+      .createQueryBuilder('tweet')
+      .where('tweet.userId = :userId', { userId: user.id })
+      .orderBy(`tweet.${sortBy}`, sortOrder)
+      .skip(offset)
+      .take(limit);
+
+    // Apply filters
+    if (type) {
+      queryBuilder.andWhere('tweet.type = :type', { type });
+    }
+
+    if (startDate) {
+      queryBuilder.andWhere('tweet.postedAt >= :startDate', { startDate });
+    }
+
+    if (endDate) {
+      queryBuilder.andWhere('tweet.postedAt <= :endDate', { endDate });
+    }
+
+    // Execute query with count
+    const [tweets, total] = await queryBuilder.getManyAndCount();
+
+    return {
+      data: tweets,
+      pagination: {
+        total,
+        offset,
+        limit,
+        hasMore: offset + tweets.length < total,
+      }
     };
   }
 

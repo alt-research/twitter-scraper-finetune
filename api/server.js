@@ -25,6 +25,9 @@ const fastify = Fastify({
 
 // Register plugins
 async function registerPlugins() {
+  // Database plugin - must be registered first
+  await fastify.register(import('./plugins/database.js'));
+  
   // Redis plugin
   await fastify.register(import('./plugins/redis.js'));
   

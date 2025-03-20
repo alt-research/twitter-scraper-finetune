@@ -6,6 +6,16 @@
   "scripts": {
     "start": "node api/server.js",
     "dev": "nodemon api/server.js",
+    "dev:setup": "bash scripts/dev-setup.sh",
+    "dev:services": "docker-compose -f docker-compose.dev.yml up -d",
+    "dev:services:stop": "docker-compose -f docker-compose.dev.yml down",
+    "migrations:run": "node api/database/migrations/runMigrations.js",
+    "migrations:generate": "typeorm-ts-node-esm migration:generate -d api/database/typeorm.config.js",
+    "init-db": "npm run migrations:run",
+    "db:backup": "bash scripts/backup-db.sh",
+    "db:restore": "bash scripts/restore-db.sh",
+    "db:maintenance": "bash scripts/db-maintenance.sh",
+    "db:scheduled-backup": "bash scripts/scheduled-backups.sh",
     "generate-virtuals": "node src/virtuals/GenerateCharacter.js",
     "twitter": "node src/twitter/index.js",
     "blog": "node src/blog/blogScrape.js",
@@ -20,11 +30,13 @@
     "fastify",
     "redis",
     "bullmq",
-    "microservice"
+    "microservice",
+    "postgres",
+    "typeorm"
   ],
   "author": "dreaminglucid",
   "license": "MIT",
-  "description": "Twitter scraper microservice API built with Fastify",
+  "description": "Twitter scraper microservice API built with Fastify and PostgreSQL",
   "dependencies": {
     "agent-twitter-client": "^0.0.13",
     "axios": "^1.7.7",
@@ -43,6 +55,7 @@
     "ioredis": "^5.3.2",
     "openai": "^4.73.1",
     "ora": "^8.1.0",
+    "pg": "^8.11.3",
     "pino-pretty": "^10.2.3",
     "progress": "^2.0.3",
     "puppeteer-cluster": "^0.24.0",
@@ -50,10 +63,12 @@
     "puppeteer-extra-plugin-adblocker": "^2.13.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "redis": "^4.6.10",
+    "reflect-metadata": "^0.1.13",
+    "typeorm": "^0.3.17",
     "ua-parser-js": "^2.0.0-rc.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "nodemon": "^3.0.1"
   },
   "repository": {
     "type": "git",
