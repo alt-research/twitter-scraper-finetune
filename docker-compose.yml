@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  twitter-api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - HOST=0.0.0.0
+      - NODE_ENV=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - TWITTER_USERNAME=${TWITTER_USERNAME}
+      - TWITTER_PASSWORD=${TWITTER_PASSWORD}
+      - MAX_TWEETS=50000
+      - MAX_RETRIES=5
+      - DEBUG=false
+    volumes:
+      - ./pipeline:/usr/src/app/pipeline
+      - ./cookies:/usr/src/app/cookies
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+volumes:
+  redis-data: 

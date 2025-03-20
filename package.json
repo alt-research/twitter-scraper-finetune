@@ -1,9 +1,11 @@
 {
-  "name": "degen_scraper",
+  "name": "twitter-scraper-api",
   "version": "1.0.0",
-  "main": "",
+  "main": "api/server.js",
   "type": "module",
   "scripts": {
+    "start": "node api/server.js",
+    "dev": "nodemon api/server.js",
     "generate-virtuals": "node src/virtuals/GenerateCharacter.js",
     "twitter": "node src/twitter/index.js",
     "blog": "node src/blog/blogScrape.js",
@@ -11,27 +13,54 @@
     "finetune": "node ./scripts/finetune.js",
     "finetune:test": "node ./scripts/finetune.js --test"
   },
-  "keywords": [],
+  "keywords": [
+    "twitter",
+    "scraper",
+    "api",
+    "fastify",
+    "redis",
+    "bullmq",
+    "microservice"
+  ],
   "author": "dreaminglucid",
   "license": "MIT",
-  "description": "",
+  "description": "Twitter scraper microservice API built with Fastify",
   "dependencies": {
     "agent-twitter-client": "^0.0.13",
     "axios": "^1.7.7",
+    "bullmq": "^4.13.1",
     "chalk": "^5.3.0",
     "cheerio": "^1.0.0",
     "cli-table3": "^0.6.5",
     "date-fns": "^4.1.0",
     "dotenv": "^16.4.5",
+    "fastify": "^4.24.3",
+    "fastify-cors": "^6.1.0",
+    "fastify-plugin": "^4.5.1",
+    "fastify-swagger": "^5.2.0",
     "fs": "^0.0.1-security",
     "inquirer": "^12.0.1",
+    "ioredis": "^5.3.2",
     "openai": "^4.73.1",
     "ora": "^8.1.0",
+    "pino-pretty": "^10.2.3",
     "progress": "^2.0.3",
     "puppeteer-cluster": "^0.24.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-adblocker": "^2.13.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "redis": "^4.6.10",
     "ua-parser-js": "^2.0.0-rc.1"
-  }
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alt-research/twitter-scraper-finetune.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alt-research/twitter-scraper-finetune/issues"
+  },
+  "homepage": "https://github.com/alt-research/twitter-scraper-finetune#readme"
 }

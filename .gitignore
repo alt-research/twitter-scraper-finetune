@@ -1,5 +1,40 @@
-.env
+# Dependencies
 node_modules/
-pipeline/
-characters/
-cookies/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Build
+/build
+/dist
+
+# Data
+/pipeline/
+/cookies/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Cache
+.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
