@@ -38,6 +38,38 @@ Example: `npm run twitter:db elonmusk`
 
 This will scrape tweets and store them directly in the PostgreSQL database configured in your `.env` file.
 
+#### Providing Twitter Credentials
+
+Twitter credentials can be provided in three ways:
+
+1. **Environment Variables (Default)**
+   ```
+   TWITTER_USERNAME=your_username
+   TWITTER_PASSWORD=your_password
+   TWITTER_EMAIL=your_email
+   ```
+
+2. **Command Line Arguments**
+   ```bash
+   npm run twitter:db elonmusk --credentials.username=alternate_account --credentials.password=your_password --credentials.email=your_email
+   ```
+
+3. **API Requests** (when using the REST API)
+   ```json
+   {
+     "username": "elonmusk",
+     "options": {
+       "credentials": {
+         "username": "alternate_account",
+         "password": "your_password",
+         "email": "your_email"
+       }
+     }
+   }
+   ```
+
+This flexibility allows you to use different Twitter accounts for different scraping operations without changing the `.env` file. The environment variables are used as defaults when credentials are not explicitly provided.
+
 ### Legacy Twitter Collection (deprecated)
 ```bash
 npm run twitter -- username
@@ -262,7 +294,12 @@ Request body:
   "options": {
     "maxTweets": 10000,
     "tweetTypes": ["original", "replies"],
-    "contentTypes": ["text", "images", "videos", "links"]
+    "contentTypes": ["text", "images", "videos", "links"],
+    "credentials": {
+      "username": "your_twitter_username",
+      "password": "your_twitter_password",
+      "email": "your_twitter_email"
+    }
   }
 }
 ```

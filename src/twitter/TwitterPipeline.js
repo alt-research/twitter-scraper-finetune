@@ -23,32 +23,39 @@ puppeteer.use(StealthPlugin());
 puppeteer.use(AdblockerPlugin({ blockTrackers: true }));
 
 class TwitterPipeline {
-  constructor(username) {
+  constructor(username, options = {}) {
     this.username = username;
     this.tweetFilter = new TweetFilter();
+    
+    // Store Twitter credentials in a single object
+    this.credentials = {
+      username: options.credentials?.username || process.env.TWITTER_USERNAME,
+      password: options.credentials?.password || process.env.TWITTER_PASSWORD,
+      email: options.credentials?.email || process.env.TWITTER_EMAIL
+    };
     
     // Create database connector instance
     this.dbConnector = new TwitterDatabaseConnector();
 
-    // Cookie path in top-level cookies directory
+    // Cookie path in top-level cookies directory - use the authenticated username for cookies
     this.cookiesPath = path.join(
       process.cwd(),
       'cookies',
-      `${process.env.TWITTER_USERNAME}_cookies.json`
+      `${this.credentials.username}_cookies.json`
     );
 
     // Enhanced configuration with fallback handling
     this.config = {
       twitter: {
-        maxTweets: parseInt(process.env.MAX_TWEETS) || 50000,
-        maxRetries: parseInt(process.env.MAX_RETRIES) || 5,
-        retryDelay: parseInt(process.env.RETRY_DELAY) || 5000,
-        minDelayBetweenRequests: parseInt(process.env.MIN_DELAY) || 1000,
-        maxDelayBetweenRequests: parseInt(process.env.MAX_DELAY) || 3000,
+        maxTweets: parseInt(options.maxTweets || process.env.MAX_TWEETS) || 50000,
+        maxRetries: parseInt(options.maxRetries || process.env.MAX_RETRIES) || 5,
+        retryDelay: parseInt(options.retryDelay || process.env.RETRY_DELAY) || 5000,
+        minDelayBetweenRequests: parseInt(options.minDelay || process.env.MIN_DELAY) || 1000,
+        maxDelayBetweenRequests: parseInt(options.maxDelay || process.env.MAX_DELAY) || 3000,
         rateLimitThreshold: 3, // Number of rate limits before considering fallback
       },
       fallback: {
-        enabled: true,
+        enabled: options.fallbackEnabled !== undefined ? options.fallbackEnabled : true,
         sessionDuration: 30 * 60 * 1000, // 30 minutes
         viewport: {
           width: 1366,
@@ -59,7 +66,7 @@ class TwitterPipeline {
         },
       },
       database: {
-        generateAnalytics: true, // By default, generate analytics
+        generateAnalytics: options.generateAnalytics !== undefined ? options.generateAnalytics : true,
       }
     };
 
@@ -114,18 +121,22 @@ class TwitterPipeline {
 
   async validateEnvironment() {
     Logger.startSpinner("Validating environment");
-    const required = ["TWITTER_USERNAME", "TWITTER_PASSWORD"];
-    const missing = required.filter((var_) => !process.env[var_]);
-
-    if (missing.length > 0) {
+    
+    // Check if we have valid Twitter credentials
+    if (!this.credentials.username || !this.credentials.password || !this.credentials.email) {
       Logger.stopSpinner(false);
-      Logger.error("Missing required environment variables:");
-      missing.forEach((var_) => Logger.error(`- ${var_}`));
-      console.log("\n📝 Create a .env file with your Twitter credentials:");
+      Logger.error("Missing required Twitter credentials:");
+      if (!this.credentials.username) Logger.error(`- Twitter Username`);
+      if (!this.credentials.password) Logger.error(`- Twitter Password`);
+      if (!this.credentials.email) Logger.error(`- Twitter Email`);
+      
+      console.log("\n📝 Provide Twitter credentials either via .env file or as options:");
       console.log(`TWITTER_USERNAME=your_username`);
       console.log(`TWITTER_PASSWORD=your_password`);
+      console.log(`TWITTER_EMAIL=your_email`);
       process.exit(1);
     }
+    
     Logger.stopSpinner();
   }
 
@@ -173,9 +184,9 @@ class TwitterPipeline {
     }
 
     // Verify all required credentials are present
-    const username = process.env.TWITTER_USERNAME;
-    const password = process.env.TWITTER_PASSWORD;
-    const email = process.env.TWITTER_EMAIL;
+    const username = this.credentials.username;
+    const password = this.credentials.password;
+    const email = this.credentials.email;
 
     if (!username || !password || !email) {
       Logger.error("Missing required credentials. Need username, password, AND email");
@@ -333,12 +344,12 @@ class TwitterPipeline {
 
         await page.type(
           'input[autocomplete="username"]',
-          process.env.TWITTER_USERNAME
+          this.credentials.username
         );
         await this.randomDelay(500, 1000);
         await page.click('div[role="button"]:not([aria-label])');
         await this.randomDelay(500, 1000);
-        await page.type('input[type="password"]', process.env.TWITTER_PASSWORD);
+        await page.type('input[type="password"]', this.credentials.password);
         await this.randomDelay(500, 1000);
         await page.click('div[role="button"][data-testid="LoginButton"]');
         await page.waitForNavigation({ waitUntil: "networkidle0" });

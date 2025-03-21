@@ -61,6 +61,15 @@ async function twitterRoutes(fastify, options) {
                   type: 'string', 
                   enum: ['text', 'images', 'videos', 'links'] 
                 } 
+              },
+              // Twitter credentials
+              credentials: {
+                type: 'object',
+                properties: {
+                  username: { type: 'string' },
+                  password: { type: 'string' },
+                  email: { type: 'string' }
+                }
               }
             }
           }
