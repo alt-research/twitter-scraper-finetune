@@ -404,6 +404,18 @@ async function twitterRoutes(fastify, options) {
             description: 'Offset for pagination',
             example: 0
           },
+          fromId: { 
+            type: 'integer', 
+            minimum: 1,
+            description: 'Start from this incrementalId (inclusive)',
+            example: 500
+          },
+          toId: { 
+            type: 'integer', 
+            minimum: 1,
+            description: 'End at this incrementalId (inclusive)',
+            example: 1500
+          },
           type: { 
             type: 'string', 
             enum: ['original', 'reply', 'retweet', 'quote'],
@@ -476,11 +488,13 @@ async function twitterRoutes(fastify, options) {
   }, async (request, reply) => {
     try {
       const { username } = request.params;
-      const { limit, offset, type, sortBy, sortOrder, startDate, endDate } = request.query;
+      const { limit, offset, fromId, toId, type, sortBy, sortOrder, startDate, endDate } = request.query;
       
       const tweets = await twitterService.getUserTweets(username, {
         limit: parseInt(limit),
         offset: parseInt(offset),
+        fromId: parseInt(fromId),
+        toId: parseInt(toId),
         type,
         sortBy,
         sortOrder,
@@ -559,6 +573,55 @@ async function twitterRoutes(fastify, options) {
         error: error.message, 
         message: 'Analytics not found. Run a scraping job first and then process the tweets with analytics'
       };
+    }
+  });
+
+  // Get incrementalId range for a user 
+  fastify.get('/tweets/:username/range', {
+    schema: {
+      description: 'Get the min and max incrementalId for a specific user',
+      tags: ['tweets'],
+      params: {
+        type: 'object',
+        properties: {
+          username: { 
+            type: 'string',
+            description: 'Twitter username',
+            example: 'elonmusk'
+          }
+        },
+        required: ['username']
+      },
+      response: {
+        200: {
+          description: 'IncrementalId range information',
+          type: 'object',
+          properties: {
+            username: { type: 'string', example: 'elonmusk' },
+            minId: { type: 'integer', example: 1 },
+            maxId: { type: 'integer', example: 5000 },
+            totalTweets: { type: 'integer', example: 5000 }
+          }
+        },
+        404: {
+          description: 'User not found or has no tweets',
+          type: 'object',
+          properties: {
+            error: { type: 'string', example: 'User not found or has no tweets' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { username } = request.params;
+      const range = await twitterService.getTweetIdRange(username);
+      
+      return range;
+    } catch (error) {
+      fastify.log.error(`Failed to get tweet ID range: ${error.message}`);
+      reply.code(404);
+      return { error: error.message };
     }
   });
 
