@@ -9,6 +9,11 @@ export const Tweet = new EntitySchema({
       type: 'uuid',
       generated: 'uuid',
     },
+    incrementalId: {
+      type: 'int',
+      generated: 'increment',
+      comment: 'Auto-incrementing ID for range queries and pagination',
+    },
     userId: {
       type: 'uuid',
     },

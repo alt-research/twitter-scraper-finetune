@@ -232,6 +232,8 @@ class TwitterService {
     const {
       limit = 20,
       offset = 0,
+      fromId = null,
+      toId = null,
       type = null,
       sortBy = 'postedAt',
       sortOrder = 'DESC',
@@ -251,12 +253,18 @@ class TwitterService {
     // Build query
     const queryBuilder = this.repositories.tweet
       .createQueryBuilder('tweet')
-      .where('tweet.userId = :userId', { userId: user.id })
-      .orderBy(`tweet.${sortBy}`, sortOrder)
-      .skip(offset)
-      .take(limit);
-
-    // Apply filters
+      .where('tweet.userId = :userId', { userId: user.id });
+    
+    // Apply incrementalId range filter if provided
+    if (fromId !== null && !isNaN(fromId)) {
+      queryBuilder.andWhere('tweet.incrementalId >= :fromId', { fromId });
+    }
+    
+    if (toId !== null && !isNaN(toId)) {
+      queryBuilder.andWhere('tweet.incrementalId <= :toId', { toId });
+    }
+    
+    // Apply other filters
     if (type) {
       queryBuilder.andWhere('tweet.type = :type', { type });
     }
@@ -268,6 +276,20 @@ class TwitterService {
     if (endDate) {
       queryBuilder.andWhere('tweet.postedAt <= :endDate', { endDate });
     }
+    
+    // Add ordering
+    queryBuilder.orderBy(`tweet.${sortBy}`, sortOrder);
+    
+    // If no incrementalId range is specified, apply limit and offset
+    if (fromId === null && toId === null) {
+      queryBuilder.skip(offset).take(limit);
+    } else {
+      // When using incrementalId range, we don't apply skip/take by default
+      // but we still respect the limit if specified
+      if (limit) {
+        queryBuilder.take(limit);
+      }
+    }
 
     // Execute query with count
     const [tweets, total] = await queryBuilder.getManyAndCount();
@@ -278,8 +300,52 @@ class TwitterService {
         total,
         offset,
         limit,
+        fromId: fromId || null,
+        toId: toId || null,
         hasMore: offset + tweets.length < total,
       }
+    };
+  }
+
+  /**
+   * Get the min and max incrementalId for a specific user
+   * 
+   * @param {string} username - Twitter username
+   * @returns {Object} - Min and max incrementalId information
+   */
+  async getTweetIdRange(username) {
+    // Find user in database
+    const user = await this.repositories.user.findOne({ 
+      where: { username } 
+    });
+
+    if (!user) {
+      throw new Error(`User @${username} not found`);
+    }
+
+    // Get min and max incrementalId from tweets table
+    const result = await this.repositories.tweet
+      .createQueryBuilder('tweet')
+      .select('MIN(tweet.incrementalId)', 'minId')
+      .addSelect('MAX(tweet.incrementalId)', 'maxId')
+      .addSelect('COUNT(tweet.id)', 'totalTweets')
+      .where('tweet.userId = :userId', { userId: user.id })
+      .getRawOne();
+    
+    // Convert values to numbers (they come as strings from raw query)
+    const minId = result.minId !== null ? parseInt(result.minId) : null;
+    const maxId = result.maxId !== null ? parseInt(result.maxId) : null;
+    const totalTweets = parseInt(result.totalTweets) || 0;
+    
+    if (totalTweets === 0 || minId === null || maxId === null) {
+      throw new Error(`No tweets found for user @${username}`);
+    }
+    
+    return {
+      username,
+      minId,
+      maxId,
+      totalTweets
     };
   }
 
