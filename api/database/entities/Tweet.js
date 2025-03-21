@@ -9,6 +9,9 @@ export const Tweet = new EntitySchema({
       type: 'uuid',
       generated: 'uuid',
     },
+    userId: {
+      type: 'uuid',
+    },
     tweetId: {
       type: 'varchar',
       length: 255,

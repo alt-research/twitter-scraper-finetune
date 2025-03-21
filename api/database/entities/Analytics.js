@@ -9,6 +9,10 @@ export const Analytics = new EntitySchema({
       type: 'uuid',
       generated: 'uuid',
     },
+    userId: {
+      type: 'uuid',
+      unique: true,
+    },
     tweetCount: {
       type: 'int',
       default: 0,

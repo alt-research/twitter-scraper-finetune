@@ -27,10 +27,12 @@ DB_DATABASE=twitter_scraper
 Initialize the database schema with:
 
 ```bash
-npm run init-db
+npm run migrations:run
 ```
 
 This runs TypeORM migrations to create all necessary tables and indexes.
+
+Note: The server startup does not automatically run migrations. You must run migrations explicitly when needed.
 
 ## Backup and Restore
 

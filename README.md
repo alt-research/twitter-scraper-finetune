@@ -117,10 +117,14 @@ A RESTful microservice API built with Fastify that exposes the core Twitter scra
 For local development, you can easily set up PostgreSQL and Redis using Docker with our convenience scripts:
 
 ```bash
-# One-command setup (starts Docker services and runs migrations)
+# One-command setup (starts Docker services)
 npm run dev:setup
+# You'll be prompted if you want to run migrations
 
-# Start the development server after setup
+# Run migrations explicitly when needed
+npm run migrations:run
+
+# Start the development server
 npm run dev
 ```
 
@@ -130,8 +134,8 @@ Or manually:
 # Just start the Docker services
 npm run dev:services
 
-# Initialize the database
-npm run init-db
+# Initialize the database (when needed, not automatically)
+npm run migrations:run
 
 # Start the development server
 npm run dev
@@ -156,7 +160,7 @@ For detailed instructions on local development, see the [Local Development Guide
 
 2. Run database migrations:
    ```bash
-   npm run init-db
+   npm run migrations:run
    ```
 
 ### Using Docker
@@ -167,7 +171,7 @@ The included Docker Compose configuration sets up PostgreSQL automatically:
 docker-compose up -d postgres
 ```
 
-Then run migrations:
+Then run migrations separately:
 
 ```bash
 docker-compose exec twitter-api npm run migrations:run
@@ -203,17 +207,29 @@ For detailed information about database management, refer to the [Database Docum
 
 Development mode with auto-reload:
 ```bash
+# Start server only
 npm run dev
+
+# Start server with migrations run first
+npm run dev:with-migrations
 ```
 
 Production mode:
 ```bash
+# Start server only
 npm start
+
+# Start server with migrations run first
+npm run start:with-migrations
 ```
 
 Docker Compose (all services):
 ```bash
+# Default: Start without running migrations
 docker-compose up -d
+
+# To start with migrations, modify the docker-compose.yml command:
+# command: ["/usr/src/app/docker-entrypoint-with-migrations.sh"]
 ```
 
 ## API Endpoints

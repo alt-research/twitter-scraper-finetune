@@ -5,9 +5,14 @@ import { AppDataSource } from '../typeorm.config.js';
  */
 async function runMigrations() {
   try {
-    // Initialize the data source
-    await AppDataSource.initialize();
-    console.log('Data Source has been initialized!');
+    // Check if connection is already initialized
+    if (!AppDataSource.isInitialized) {
+      // Initialize the data source
+      await AppDataSource.initialize();
+      console.log('Data Source has been initialized!');
+    } else {
+      console.log('Using existing database connection');
+    }
 
     // Run migrations
     console.log('Running migrations...');
@@ -22,14 +27,22 @@ async function runMigrations() {
       });
     }
 
-    // Close the connection
-    await AppDataSource.destroy();
-    console.log('Connection closed.');
+    // Close the connection only if we initialized it
+    if (AppDataSource.isInitialized && !process.env.KEEP_CONNECTION_OPEN) {
+      await AppDataSource.destroy();
+      console.log('Connection closed.');
+    }
     
-    process.exit(0);
+    if (!process.env.KEEP_CONNECTION_OPEN) {
+      process.exit(0);
+    }
   } catch (error) {
     console.error('Error during migration:', error);
-    process.exit(1);
+    if (!process.env.KEEP_CONNECTION_OPEN) {
+      process.exit(1);
+    } else {
+      throw error;
+    }
   }
 }
 

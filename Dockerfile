@@ -36,21 +36,28 @@ COPY . .
 RUN mkdir -p /usr/src/app/data /usr/src/app/cookies
 RUN chmod -R 777 /usr/src/app/data /usr/src/app/cookies
 
-# Create entrypoint script
+# Create entrypoint script (without migrations)
 RUN echo '#!/bin/bash\n\
 # Wait for dependencies\n\
 wait-for-it ${DB_HOST:-postgres}:${DB_PORT:-5432} -t 60\n\
 wait-for-it ${REDIS_HOST:-redis}:${REDIS_PORT:-6379} -t 60\n\
 \n\
-# Run migrations\n\
-npm run init-db\n\
-\n\
 # Start the application\n\
 exec npm start' > /usr/src/app/docker-entrypoint.sh && \
 chmod +x /usr/src/app/docker-entrypoint.sh
 
+# Create alternative entrypoint script (with migrations)
+RUN echo '#!/bin/bash\n\
+# Wait for dependencies\n\
+wait-for-it ${DB_HOST:-postgres}:${DB_PORT:-5432} -t 60\n\
+wait-for-it ${REDIS_HOST:-redis}:${REDIS_PORT:-6379} -t 60\n\
+\n\
+# Run migrations and start the application\n\
+exec npm run start:with-migrations' > /usr/src/app/docker-entrypoint-with-migrations.sh && \
+chmod +x /usr/src/app/docker-entrypoint-with-migrations.sh
+
 # Expose the API port
 EXPOSE 3000
 
-# Start the application
+# Start the application (default: without migrations)
 CMD ["/usr/src/app/docker-entrypoint.sh"]

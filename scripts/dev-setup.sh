@@ -65,9 +65,14 @@ done
 
 echo "Redis is ready!"
 
-# Initialize the database
-echo "Initializing the database..."
-npm run init-db
+# Ask if the user wants to initialize the database
+read -p "Do you want to initialize the database with migrations? (y/n): " run_migrations
+if [ "$run_migrations" = "y" ] || [ "$run_migrations" = "Y" ]; then
+  echo "Initializing the database..."
+  npm run migrations:run
+else
+  echo "Skipping database initialization. You can run migrations later with: npm run migrations:run"
+fi
 
 echo "✅ Development environment is set up and ready!"
 echo ""

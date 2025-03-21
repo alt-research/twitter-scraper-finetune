@@ -17,6 +17,7 @@ export const AppDataSource = new DataSource({
   logging: process.env.NODE_ENV === 'development',
   entities: [path.join(__dirname, 'entities', '*.js')],
   migrations: [path.join(__dirname, 'migrations', '*.js')],
+  migrationsRun: false,
   subscribers: [],
 });
 
