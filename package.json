@@ -20,6 +20,7 @@
     "db:scheduled-backup": "bash scripts/scheduled-backups.sh",
     "generate-virtuals": "node src/virtuals/GenerateCharacter.js",
     "twitter": "node src/twitter/index.js",
+    "twitter:db": "node src/scripts/scrape-to-db.js",
     "blog": "node src/blog/blogScrape.js",
     "character": "node src/character/GenerateCharacter.js",
     "finetune": "node ./scripts/finetune.js",

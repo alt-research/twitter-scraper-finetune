@@ -6,8 +6,8 @@ import fs from "fs/promises";
 
 // Imported Files
 import Logger from "./Logger.js";
-import DataOrganizer from "./DataOrganizer.js";
 import TweetFilter from "./TweetFilter.js";
+import TwitterDatabaseConnector from "./TwitterDatabaseConnector.js";
 
 // agent-twitter-client
 import { Scraper, SearchMode } from "agent-twitter-client";
@@ -25,12 +25,13 @@ puppeteer.use(AdblockerPlugin({ blockTrackers: true }));
 class TwitterPipeline {
   constructor(username) {
     this.username = username;
-    this.dataOrganizer = new DataOrganizer("pipeline", username);
-    this.paths = this.dataOrganizer.getPaths();
     this.tweetFilter = new TweetFilter();
+    
+    // Create database connector instance
+    this.dbConnector = new TwitterDatabaseConnector();
 
-    // Update cookie path to be in top-level cookies directory
-    this.paths.cookies = path.join(
+    // Cookie path in top-level cookies directory
+    this.cookiesPath = path.join(
       process.cwd(),
       'cookies',
       `${process.env.TWITTER_USERNAME}_cookies.json`
@@ -57,6 +58,9 @@ class TwitterPipeline {
           isLandscape: true,
         },
       },
+      database: {
+        generateAnalytics: true, // By default, generate analytics
+      }
     };
 
     this.scraper = new Scraper();
@@ -125,10 +129,10 @@ class TwitterPipeline {
     Logger.stopSpinner();
   }
 
-async loadCookies() {
+  async loadCookies() {
     try {
-      if (await fs.access(this.paths.cookies).catch(() => false)) {
-        const cookiesData = await fs.readFile(this.paths.cookies, 'utf-8');
+      if (await fs.access(this.cookiesPath).catch(() => false)) {
+        const cookiesData = await fs.readFile(this.cookiesPath, 'utf-8');
         const cookies = JSON.parse(cookiesData);
         await this.scraper.setCookies(cookies);
         return true;
@@ -137,20 +141,19 @@ async loadCookies() {
       Logger.warn(`Failed to load cookies: ${error.message}`);
     }
     return false;
-}
+  }
 
-async saveCookies() {
+  async saveCookies() {
     try {
       const cookies = await this.scraper.getCookies();
       // Create cookies directory if it doesn't exist
-      await fs.mkdir(path.dirname(this.paths.cookies), { recursive: true });
-      await fs.writeFile(this.paths.cookies, JSON.stringify(cookies));
+      await fs.mkdir(path.dirname(this.cookiesPath), { recursive: true });
+      await fs.writeFile(this.cookiesPath, JSON.stringify(cookies));
       Logger.success('Saved authentication cookies');
     } catch (error) {
       Logger.warn(`Failed to save cookies: ${error.message}`);
     }
-}
-
+  }
 
   async initializeScraper() {
     Logger.startSpinner("Initializing Twitter scraper");
@@ -221,7 +224,6 @@ async saveCookies() {
     return false;
   }
 
-
   async randomDelay(min, max) {
     // Gaussian distribution for more natural delays
     const gaussianRand = () => {
@@ -233,66 +235,6 @@ async saveCookies() {
     const delay = Math.floor(min + gaussianRand() * (max - min));
     Logger.info(`Waiting ${(delay / 1000).toFixed(1)} seconds...`);
     await new Promise(resolve => setTimeout(resolve, delay));
-  }
-
-  /*
-  async initializeScraper() {
-    Logger.startSpinner("Initializing Twitter scraper");
-    let retryCount = 0;
-
-    while (retryCount < this.config.twitter.maxRetries) {
-      try {
-        const username = process.env.TWITTER_USERNAME;
-        const password = process.env.TWITTER_PASSWORD;
-
-        if (!username || !password) {
-          throw new Error("Twitter credentials not found");
-        }
-
-        // Try login with minimal parameters first
-        await this.scraper.login(username, password);
-
-        if (await this.scraper.isLoggedIn()) {
-          Logger.success("✅ Successfully authenticated with Twitter");
-          Logger.stopSpinner();
-          return true;
-        } else {
-          throw new Error("Authentication failed");
-        }
-      } catch (error) {
-        retryCount++;
-        Logger.warn(
-          `⚠️  Authentication attempt ${retryCount} failed: ${error.message}`
-        );
-
-        if (retryCount >= this.config.twitter.maxRetries) {
-          Logger.stopSpinner(false);
-          // Don't throw - allow fallback
-          return false;
-        }
-
-        await this.randomDelay(
-          this.config.twitter.retryDelay * retryCount,
-          this.config.twitter.retryDelay * retryCount * 2
-        );
-      }
-    }
-    return false;
-  }   */
-
-  async randomDelay(min = null, max = null) {
-    const minDelay = min || this.config.twitter.minDelayBetweenRequests;
-    const maxDelay = max || this.config.twitter.maxDelayBetweenRequests;
-
-    // Use gaussian distribution for more natural delays
-    const gaussianRand = () => {
-      let rand = 0;
-      for (let i = 0; i < 6; i++) rand += Math.random();
-      return rand / 6;
-    };
-
-    const delay = Math.floor(minDelay + gaussianRand() * (maxDelay - minDelay));
-    await new Promise((resolve) => setTimeout(resolve, delay));
   }
 
   async handleRateLimit(retryCount = 1) {
@@ -643,6 +585,101 @@ async saveCookies() {
     return profile;
   }
 
+  /**
+   * Stores scraped tweets directly in the database
+   * @param {Array} tweets - Array of tweets to store
+   * @param {Object} userData - User profile data
+   * @returns {Object} - Result of the database storage operation
+   */
+  async storeInDatabase(tweets, userData) {
+    try {
+      Logger.startSpinner(`Storing ${tweets.length} tweets in database`);
+      
+      const result = await this.dbConnector.storeTweets(this.username, tweets, userData);
+      
+      Logger.stopSpinner();
+      Logger.success(`✅ Successfully stored ${result.savedCount} tweets in database`);
+      
+      // Generate analytics if configured
+      if (this.config.database.generateAnalytics && result.user && result.user.id) {
+        Logger.startSpinner('Generating analytics');
+        await this.dbConnector.generateAnalytics(this.username, result.user.id);
+        Logger.stopSpinner();
+        Logger.success('✅ Generated analytics for user');
+      }
+      
+      return result;
+    } catch (error) {
+      Logger.stopSpinner(false);
+      Logger.error(`Failed to store tweets in database: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Calculate basic analytics about the collected tweets
+   * @param {Array} tweets - Array of tweets to analyze
+   * @returns {Object} - Analytics data
+   */
+  calculateBasicAnalytics(tweets) {
+    // Extract tweet types
+    const tweetTypes = tweets.reduce((acc, tweet) => {
+      if (tweet.isReply || tweet.in_reply_to_status_id_str) acc.replies++;
+      else if (tweet.isRetweet || tweet.retweeted_status) acc.retweets++;
+      else acc.directTweets++;
+      return acc;
+    }, { directTweets: 0, replies: 0, retweets: 0 });
+    
+    // Find date range
+    const dates = tweets
+      .map(t => new Date(t.timestamp || t.created_at || t.createdAt))
+      .filter(d => !isNaN(d.getTime()))
+      .sort((a, b) => a - b);
+    
+    const timeRange = {
+      start: dates.length ? format(dates[0], 'yyyy-MM-dd') : 'N/A',
+      end: dates.length ? format(dates[dates.length - 1], 'yyyy-MM-dd') : 'N/A'
+    };
+    
+    // Content type breakdown
+    const contentTypes = {
+      textOnly: tweets.filter(t => 
+        (!t.photos || t.photos.length === 0) && 
+        (!t.videos || t.videos.length === 0) && 
+        (!t.entities?.media || t.entities.media.length === 0)
+      ).length,
+      withImages: tweets.filter(t => 
+        (t.photos && t.photos.length > 0) || 
+        (t.entities?.media && t.entities.media.some(m => m.type === 'photo'))
+      ).length,
+      withVideos: tweets.filter(t => 
+        (t.videos && t.videos.length > 0) || 
+        (t.entities?.media && t.entities.media.some(m => ['video', 'animated_gif'].includes(m.type)))
+      ).length,
+      withLinks: tweets.filter(t => 
+        (t.urls && t.urls.length > 0) || 
+        (t.entities?.urls && t.entities.urls.length > 0)
+      ).length
+    };
+    
+    // Engagement statistics
+    const engagement = {
+      totalLikes: tweets.reduce((sum, t) => sum + (t.likes || t.favorite_count || 0), 0),
+      totalRetweetCount: tweets.reduce((sum, t) => sum + (t.retweetCount || t.retweet_count || 0), 0),
+      totalReplies: tweets.reduce((sum, t) => sum + (t.replies || t.reply_count || 0), 0),
+      averageLikes: tweets.length > 0 
+        ? Math.round(tweets.reduce((sum, t) => sum + (t.likes || t.favorite_count || 0), 0) / tweets.length)
+        : 0
+    };
+    
+    return {
+      ...tweetTypes,
+      timeRange,
+      contentTypes,
+      engagement
+    };
+  }
+
   async run() {
     const startTime = Date.now();
 
@@ -669,13 +706,29 @@ async saveCookies() {
 
       if (allTweets.length === 0) {
         Logger.warn("⚠️  No tweets collected");
-        return;
+        return { tweets: [], user: null };
       }
 
-      // Save collected data
-      Logger.startSpinner("Processing and saving data");
-      const analytics = await this.dataOrganizer.saveTweets(allTweets);
-      Logger.stopSpinner();
+      // Get user profile data
+      let userData = null;
+      try {
+        userData = await this.getProfile();
+        Logger.info(`Retrieved profile data for @${this.username}`);
+      } catch (error) {
+        Logger.warn(`Failed to retrieve profile data: ${error.message}`);
+      }
+
+      // Calculate basic analytics for display
+      const analytics = this.calculateBasicAnalytics(allTweets);
+      
+      // Store in database
+      let dbResult = null;
+      try {
+        dbResult = await this.storeInDatabase(allTweets, userData);
+      } catch (dbError) {
+        Logger.error(`Database storage failed: ${dbError.message}`);
+        throw dbError; // Re-throw as we're only using the database for storage now
+      }
 
       // Calculate final statistics
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -690,15 +743,17 @@ async saveCookies() {
       Logger.stats("📈 Collection Results", {
         "Total Tweets": allTweets.length.toLocaleString(),
         "Original Tweets": analytics.directTweets.toLocaleString(),
-        Replies: analytics.replies.toLocaleString(),
-        Retweets: analytics.retweets.toLocaleString(),
+        "Replies": analytics.replies.toLocaleString(),
+        "Retweets": analytics.retweets.toLocaleString(),
         "Date Range": `${analytics.timeRange.start} to ${analytics.timeRange.end}`,
-        Runtime: `${duration} seconds`,
+        "Runtime": `${duration} seconds`,
         "Collection Rate": `${tweetsPerMinute} tweets/minute`,
         "Success Rate": `${successRate}%`,
         "Rate Limit Hits": this.stats.rateLimitHits.toLocaleString(),
         "Fallback Collections": this.stats.fallbackCount.toLocaleString(),
-        "Storage Location": chalk.gray(this.dataOrganizer.baseDir),
+        "Database Storage": dbResult ? 
+          `✅ Success (${dbResult.savedCount} tweets)` : 
+          "❌ Failed"
       });
 
       // Content type breakdown
@@ -762,13 +817,11 @@ async saveCookies() {
         );
       }
 
-      // Show sample tweets
-      // await this.showSampleTweets(allTweets);
-
       // Cleanup
       await this.cleanup();
 
-      return analytics;
+      // Return the tweets and user data for potential further processing
+      return { tweets: allTweets, user: userData };
     } catch (error) {
       Logger.error(`Pipeline failed: ${error.message}`);
       await this.logError(error, {
@@ -810,32 +863,8 @@ async saveCookies() {
       },
     };
 
-    const errorLogPath = path.join(
-      this.dataOrganizer.baseDir,
-      "meta",
-      "error_log.json"
-    );
-
-    try {
-      let existingLogs = [];
-      try {
-        const existing = await fs.readFile(errorLogPath, "utf-8");
-        existingLogs = JSON.parse(existing);
-      } catch {
-        // File doesn't exist yet
-      }
-
-      existingLogs.push(errorLog);
-
-      // Keep only recent errors
-      if (existingLogs.length > 100) {
-        existingLogs = existingLogs.slice(-100);
-      }
-
-      await fs.writeFile(errorLogPath, JSON.stringify(existingLogs, null, 2));
-    } catch (logError) {
-      Logger.error(`Failed to save error log: ${logError.message}`);
-    }
+    // Log error to console only since we're not using the file system
+    console.error('Pipeline Error Log:', JSON.stringify(errorLog, null, 2));
   }
 
   async cleanup() {
@@ -851,23 +880,16 @@ async saveCookies() {
         await this.cluster.close();
         Logger.success("🔒 Cleaned up fallback system");
       }
-
-      // await this.saveProgress(null, null, this.stats.uniqueTweets, {
-      //   completed: true,
-      //   endTime: new Date().toISOString(),
-      //   fallbackUsed: this.stats.fallbackUsed,
-      //   fallbackCount: this.stats.fallbackCount,
-      //   rateLimitHits: this.stats.rateLimitHits,
-      // });
+      
+      // Cleanup database connection
+      if (this.dbConnector) {
+        await this.dbConnector.close();
+        Logger.success("🔒 Closed database connection");
+      }
 
       Logger.success("✨ Cleanup complete");
     } catch (error) {
       Logger.warn(`⚠️  Cleanup error: ${error.message}`);
-      // await this.saveProgress(null, null, this.stats.uniqueTweets, {
-      //   completed: true,
-      //   endTime: new Date().toISOString(),
-      //   error: error.message,
-      // });
     }
   }
 }

@@ -30,11 +30,21 @@ Pipeline for generating AI character files and training datasets by scraping pub
 
 ## Usage
 
-### Twitter Collection
+### Twitter Collection with Database Storage
+```bash
+npm run twitter:db [username]
+```
+Example: `npm run twitter:db elonmusk`
+
+This will scrape tweets and store them directly in the PostgreSQL database configured in your `.env` file.
+
+### Legacy Twitter Collection (deprecated)
 ```bash
 npm run twitter -- username
 ```
 Example: `npm run twitter -- pmarca`
+
+> **Note**: This method stores tweets only in the file system. Consider using the database storage method instead.
 
 ### Blog Collection
 ```bash
@@ -388,3 +398,50 @@ For production deployments:
 ## License
 
 MIT
+
+## Database Integration
+
+This project now uses PostgreSQL as its primary data store. All Twitter data scraped with the `twitter:db` command is stored directly in the database, making it immediately available to the API.
+
+### Running with Database Integration
+
+To use the database integration:
+
+1. Make sure your PostgreSQL database is set up and running (see PostgreSQL Setup section)
+2. Ensure your `.env` file includes the `DATABASE_URL` variable pointing to your database
+3. Run the Twitter scraper with database integration:
+
+```bash
+# Run with interactive prompts
+npm run twitter:db
+
+# Or specify a username directly
+npm run twitter:db elonmusk
+```
+
+The script will:
+- Scrape tweets from the specified account
+- Store user data, tweets, and analytics in the database
+- Generate analytics for the user's tweets
+
+### Database Schema Integration
+
+The scraper integrates with the following database tables:
+
+- **users**: Stores information about Twitter users
+- **tweets**: Stores all collected tweets with their metadata
+- **analytics**: Stores computed analytics for each user
+
+### API Access
+
+Once data is stored in the database, you can access it through the API:
+
+```bash
+# Start the API server
+npm run dev
+
+# Access data through endpoints like:
+# - GET /api/twitter/users/:username
+# - GET /api/twitter/tweets/:username
+# - GET /api/twitter/analytics/:username
+```
