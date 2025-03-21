@@ -15,11 +15,70 @@ The Twitter Scraper API uses PostgreSQL to store the following data:
 Database connection settings are configured in `.env`:
 
 ```
+DB_URL=postgres://postgres:postgres@localhost:5432/twitter_scraper
+```
+
+Alternatively, you can use individual connection parameters:
+
+```
 DB_HOST=localhost
 DB_PORT=5432
 DB_USERNAME=postgres
 DB_PASSWORD=postgres
 DB_DATABASE=twitter_scraper
+```
+
+Note: The system prioritizes the `DB_URL` if provided, otherwise it falls back to the individual parameters.
+
+## Database Error Logging
+
+The application includes a robust logging system for database errors, which helps with troubleshooting and monitoring:
+
+### Log Storage
+
+Database errors are logged to the `db_logs` directory in the project root. This directory is:
+
+- Added to `.gitignore` to prevent logs from being committed to the repository
+- Mounted as a volume in Docker configurations for persistence
+
+### Log Types
+
+The system logs different types of database errors:
+
+- **Connection Errors**: Issues with connecting to the database
+- **Transaction Errors**: Problems with database transactions
+- **Query Errors**: Failures in SQL queries
+- **General Database Errors**: Any other database-related errors
+
+### Log Format
+
+Each log entry includes:
+
+- Timestamp in ISO format
+- Error level (ERROR, WARN, INFO, DEBUG)
+- Error message and stack trace
+- Contextual information (operation being performed, involved entities, etc.)
+- Related SQL query (when applicable)
+
+### Log Management
+
+To maintain the logs and prevent them from growing too large:
+
+```bash
+# Run the log maintenance script
+npm run db:logs-maintenance
+```
+
+This script:
+- Rotates logs that exceed a specified size (default: 10MB)
+- Compresses old log files
+- Removes logs older than a specified number of days (default: 7)
+- Provides a summary of log storage
+
+You can configure the log maintenance behavior with environment variables:
+
+```bash
+DB_LOGS_DIR=./custom/logs RETENTION_DAYS=14 npm run db:logs-maintenance
 ```
 
 ## Schema Initialization
@@ -181,4 +240,4 @@ maintenance_work_mem = 128MB  # Larger for vacuum operations
 effective_cache_size = 1GB    # Estimate of memory available for disk caching
 ```
 
-These settings should be added to the PostgreSQL configuration file. 
+These settings should be added to the PostgreSQL configuration file.

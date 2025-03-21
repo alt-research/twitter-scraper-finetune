@@ -18,6 +18,7 @@ yarn-error.log
 # Data
 /pipeline/
 /cookies/
+/db_logs/
 
 # Logs
 logs

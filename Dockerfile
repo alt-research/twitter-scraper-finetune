@@ -33,13 +33,19 @@ RUN npm ci --only=production
 COPY . .
 
 # Create directories for data persistence
-RUN mkdir -p /usr/src/app/data /usr/src/app/cookies
-RUN chmod -R 777 /usr/src/app/data /usr/src/app/cookies
+RUN mkdir -p /usr/src/app/data /usr/src/app/cookies /usr/src/app/db_logs
+RUN chmod -R 777 /usr/src/app/data /usr/src/app/cookies /usr/src/app/db_logs
 
 # Create entrypoint script (without migrations)
 RUN echo '#!/bin/bash\n\
 # Wait for dependencies\n\
-wait-for-it ${DB_HOST:-postgres}:${DB_PORT:-5432} -t 60\n\
+if [ -n "$DB_URL" ]; then\n\
+  DB_HOST=$(echo $DB_URL | sed -e "s/.*@\([^:]*\).*/\1/")\n\
+  DB_PORT=$(echo $DB_URL | sed -e "s/.*:\([0-9]*\)\/.*/\1/")\n\
+  wait-for-it ${DB_HOST}:${DB_PORT} -t 60\n\
+else\n\
+  wait-for-it ${DB_HOST:-postgres}:${DB_PORT:-5432} -t 60\n\
+fi\n\
 wait-for-it ${REDIS_HOST:-redis}:${REDIS_PORT:-6379} -t 60\n\
 \n\
 # Start the application\n\
@@ -49,7 +55,13 @@ chmod +x /usr/src/app/docker-entrypoint.sh
 # Create alternative entrypoint script (with migrations)
 RUN echo '#!/bin/bash\n\
 # Wait for dependencies\n\
-wait-for-it ${DB_HOST:-postgres}:${DB_PORT:-5432} -t 60\n\
+if [ -n "$DB_URL" ]; then\n\
+  DB_HOST=$(echo $DB_URL | sed -e "s/.*@\([^:]*\).*/\1/")\n\
+  DB_PORT=$(echo $DB_URL | sed -e "s/.*:\([0-9]*\)\/.*/\1/")\n\
+  wait-for-it ${DB_HOST}:${DB_PORT} -t 60\n\
+else\n\
+  wait-for-it ${DB_HOST:-postgres}:${DB_PORT:-5432} -t 60\n\
+fi\n\
 wait-for-it ${REDIS_HOST:-redis}:${REDIS_PORT:-6379} -t 60\n\
 \n\
 # Run migrations and start the application\n\

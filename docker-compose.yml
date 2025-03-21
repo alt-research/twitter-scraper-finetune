@@ -9,6 +9,8 @@ services:
       - PORT=3000
       - HOST=0.0.0.0
       - NODE_ENV=production
+      # Database config - use DB_URL if provided, otherwise use individual params
+      - DB_URL=${DB_URL}
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USERNAME=postgres
@@ -19,12 +21,14 @@ services:
       - REDIS_PASSWORD=
       - TWITTER_USERNAME=${TWITTER_USERNAME}
       - TWITTER_PASSWORD=${TWITTER_PASSWORD}
+      - TWITTER_EMAIL=${TWITTER_EMAIL}
       - MAX_TWEETS=50000
       - MAX_RETRIES=5
       - DEBUG=false
     volumes:
       - ./data:/usr/src/app/data
       - ./cookies:/usr/src/app/cookies
+      - ./db_logs:/usr/src/app/db_logs
     depends_on:
       - redis
       - postgres

@@ -63,13 +63,21 @@ async function twitterRoutes(fastify, options) {
                 } 
               }
             }
+          },
+          credentials: {
+            type: 'object',
+            properties: {
+              twitterUsername: { type: 'string', minLength: 1 },
+              twitterPassword: { type: 'string', minLength: 1 },
+              twitterEmail: { type: 'string', format: 'email' }
+            }
           }
         }
       }
     }
   }, async (request, reply) => {
-    const { username, options } = request.body;
-    const result = await twitterService.queueScrapeJob(username, options);
+    const { username, options, credentials } = request.body;
+    const result = await twitterService.queueScrapeJob(username, options, credentials);
     
     if (result.status === 'already_running') {
       reply.code(409); // Conflict

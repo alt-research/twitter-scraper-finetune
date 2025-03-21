@@ -18,6 +18,7 @@
     "db:restore": "bash scripts/restore-db.sh",
     "db:maintenance": "bash scripts/db-maintenance.sh",
     "db:scheduled-backup": "bash scripts/scheduled-backups.sh",
+    "db:logs-maintenance": "bash scripts/db-logs-maintenance.sh",
     "generate-virtuals": "node src/virtuals/GenerateCharacter.js",
     "twitter": "node src/twitter/index.js",
     "twitter:db": "node src/scripts/scrape-to-db.js",

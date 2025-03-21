@@ -6,13 +6,23 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Create configuration - use DB_URL if available, otherwise use individual params
+const connectionConfig = process.env.DB_URL
+  ? { 
+      type: 'postgres',
+      url: process.env.DB_URL
+    }
+  : {
+      type: 'postgres',
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || '5432'),
+      username: process.env.DB_USERNAME || 'postgres',
+      password: process.env.DB_PASSWORD || 'postgres',
+      database: process.env.DB_DATABASE || 'twitter_scraper',
+    };
+
 export const AppDataSource = new DataSource({
-  type: 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  username: process.env.DB_USERNAME || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
-  database: process.env.DB_DATABASE || 'twitter_scraper',
+  ...connectionConfig,
   // synchronize: process.env.NODE_ENV === 'development', // Auto-create schema in development
   synchronize: false,
   logging: process.env.NODE_ENV === 'development',

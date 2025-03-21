@@ -13,9 +13,13 @@ Pipeline for generating AI character files and training datasets by scraping pub
 
 2. Copy the `.env.example` into a `.env` file:
    ```properties
-   # (Required) Twitter Authentication
-   TWITTER_USERNAME=     # your twitter username
-   TWITTER_PASSWORD=     # your twitter password
+   # (Optional) Twitter Authentication
+   TWITTER_USERNAME=     # your twitter username (optional)
+   TWITTER_PASSWORD=     # your twitter password (optional)
+   TWITTER_EMAIL=        # your twitter email (optional)
+
+   # (Required) Database Connection
+   DB_URL=         # PostgreSQL connection URL
 
    # (Optional) Blog Configuration
    BLOG_URLS_FILE=      # path to file containing blog URLs
@@ -28,6 +32,8 @@ Pipeline for generating AI character files and training datasets by scraping pub
    MAX_DELAY=           # maximum delay between requests
    ```
 
+   Note: Twitter credentials can now be provided either via environment variables or directly through API parameters.
+
 ## Usage
 
 ### Twitter Collection with Database Storage
@@ -35,6 +41,11 @@ Pipeline for generating AI character files and training datasets by scraping pub
 npm run twitter:db [username]
 ```
 Example: `npm run twitter:db elonmusk`
+
+You can also provide Twitter credentials directly:
+```bash
+npm run twitter:db elonmusk --twitter-username user1 --twitter-password pass123 --twitter-email user@example.com
+```
 
 This will scrape tweets and store them directly in the PostgreSQL database configured in your `.env` file.
 
@@ -94,6 +105,7 @@ A RESTful microservice API built with Fastify that exposes the core Twitter scra
 - **Asynchronous Processing**: Non-blocking API for handling long-running tasks
 - **Job Management**: Monitor, track, and cancel jobs
 - **Database Management**: Automatic backup and maintenance scripts
+- **Flexible Authentication**: Support for providing Twitter credentials through API parameters
 
 ## Requirements
 
@@ -209,7 +221,22 @@ The project includes comprehensive scripts for database management:
 ```bash
 # Run database maintenance
 ./scripts/db-maintenance.sh
+
+# Run database logs maintenance (rotate and clean old logs)
+./scripts/db-logs-maintenance.sh
+# Or use npm script
+npm run db:logs-maintenance
 ```
+
+### Database Error Logging
+
+The system includes a robust logging system for database errors:
+
+- Database errors are logged to the `db_logs` directory (which is ignored by Git)
+- Logs include detailed context about the error, including timestamps and SQL
+- Different log levels are supported: ERROR, WARN, INFO, DEBUG
+- Automatic log rotation prevents log files from growing too large
+- Maintenance script for managing log files: `npm run db:logs-maintenance`
 
 For detailed information about database management, refer to the [Database Documentation](docs/DATABASE.md).
 
@@ -263,9 +290,18 @@ Request body:
     "maxTweets": 10000,
     "tweetTypes": ["original", "replies"],
     "contentTypes": ["text", "images", "videos", "links"]
+  },
+  "credentials": {
+    "twitterUsername": "your_twitter_username",
+    "twitterPassword": "your_twitter_password",
+    "twitterEmail": "your_twitter_email"
   }
 }
 ```
+
+Notes:
+- The `credentials` object is optional. If not provided, the system will use the credentials from environment variables
+- This allows using different Twitter accounts for different scraping jobs without changing environment variables
 
 Process scraped tweets:
 ```
@@ -408,7 +444,7 @@ This project now uses PostgreSQL as its primary data store. All Twitter data scr
 To use the database integration:
 
 1. Make sure your PostgreSQL database is set up and running (see PostgreSQL Setup section)
-2. Ensure your `.env` file includes the `DATABASE_URL` variable pointing to your database
+2. Ensure your `.env` file includes the `DB_URL` variable pointing to your database
 3. Run the Twitter scraper with database integration:
 
 ```bash

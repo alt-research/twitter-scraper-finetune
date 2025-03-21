@@ -23,9 +23,16 @@ puppeteer.use(StealthPlugin());
 puppeteer.use(AdblockerPlugin({ blockTrackers: true }));
 
 class TwitterPipeline {
-  constructor(username) {
+  constructor(username, credentials = null) {
     this.username = username;
     this.tweetFilter = new TweetFilter();
+    
+    // Store credentials (if provided)
+    this.credentials = credentials || {
+      twitterUsername: process.env.TWITTER_USERNAME,
+      twitterPassword: process.env.TWITTER_PASSWORD,
+      twitterEmail: process.env.TWITTER_EMAIL
+    };
     
     // Create database connector instance
     this.dbConnector = new TwitterDatabaseConnector();
@@ -34,7 +41,7 @@ class TwitterPipeline {
     this.cookiesPath = path.join(
       process.cwd(),
       'cookies',
-      `${process.env.TWITTER_USERNAME}_cookies.json`
+      `${this.credentials.twitterUsername}_cookies.json`
     );
 
     // Enhanced configuration with fallback handling
@@ -113,20 +120,34 @@ class TwitterPipeline {
   }
 
   async validateEnvironment() {
-    Logger.startSpinner("Validating environment");
-    const required = ["TWITTER_USERNAME", "TWITTER_PASSWORD"];
-    const missing = required.filter((var_) => !process.env[var_]);
-
-    if (missing.length > 0) {
-      Logger.stopSpinner(false);
-      Logger.error("Missing required environment variables:");
-      missing.forEach((var_) => Logger.error(`- ${var_}`));
-      console.log("\n📝 Create a .env file with your Twitter credentials:");
-      console.log(`TWITTER_USERNAME=your_username`);
-      console.log(`TWITTER_PASSWORD=your_password`);
-      process.exit(1);
+    Logger.startSpinner("Validating credentials");
+    
+    // Check if credentials are available either in the object or environment variables
+    const missingCredentials = [];
+    
+    if (!this.credentials.twitterUsername) {
+      missingCredentials.push("TWITTER_USERNAME");
     }
+    
+    if (!this.credentials.twitterPassword) {
+      missingCredentials.push("TWITTER_PASSWORD");
+    }
+
+    if (missingCredentials.length > 0) {
+      Logger.stopSpinner(false);
+      Logger.error("Missing required Twitter credentials:");
+      missingCredentials.forEach((cred) => Logger.error(`- ${cred}`));
+      console.log("\n📝 Please provide valid Twitter credentials.");
+      console.log("You can either:");
+      console.log("1. Create a .env file with your Twitter credentials:");
+      console.log(`   TWITTER_USERNAME=your_username`);
+      console.log(`   TWITTER_PASSWORD=your_password`);
+      console.log("2. Or pass credentials via the API request body");
+      throw new Error("Missing Twitter credentials");
+    }
+    
     Logger.stopSpinner();
+    return true;
   }
 
   async loadCookies() {
@@ -159,69 +180,55 @@ class TwitterPipeline {
     Logger.startSpinner("Initializing Twitter scraper");
     let retryCount = 0;
 
-    // Try loading cookies first
-    if (await this.loadCookies()) {
-      try {
-        if (await this.scraper.isLoggedIn()) {
-          Logger.success("✅ Successfully authenticated with saved cookies");
-          Logger.stopSpinner();
-          return true;
-        }
-      } catch (error) {
-        Logger.warn("Saved cookies are invalid, attempting fresh login");
-      }
-    }
-
-    // Verify all required credentials are present
-    const username = process.env.TWITTER_USERNAME;
-    const password = process.env.TWITTER_PASSWORD;
-    const email = process.env.TWITTER_EMAIL;
-
-    if (!username || !password || !email) {
-      Logger.error("Missing required credentials. Need username, password, AND email");
-      Logger.stopSpinner(false);
-      return false;
-    }
-
-    // Attempt login with email verification
     while (retryCount < this.config.twitter.maxRetries) {
       try {
-        // Add random delay before login attempt
-        await this.randomDelay(5000, 10000);
+        const cookiesLoaded = await this.loadCookies();
 
-        // Always use email in login attempt
-        await this.scraper.login(username, password, email);
-
-        // Verify login success
-        const isLoggedIn = await this.scraper.isLoggedIn();
-        if (isLoggedIn) {
+        if (!cookiesLoaded) {
+          // Use credentials from the object instead of directly from env vars
+          await this.scraper.login(
+            this.credentials.twitterUsername,
+            this.credentials.twitterPassword,
+            this.credentials.twitterEmail
+          );
           await this.saveCookies();
-          Logger.success("✅ Successfully authenticated with Twitter");
-          Logger.stopSpinner();
-          return true;
-        } else {
-          throw new Error("Login verification failed");
         }
 
+        // Verify authentication worked
+        const isLoggedIn = await this.scraper.isLoggedIn();
+        if (!isLoggedIn) {
+          Logger.warn("Cookie-based authentication failed, logging in again");
+          
+          // Use credentials from the object instead of directly from env vars
+          await this.scraper.login(
+            this.credentials.twitterUsername,
+            this.credentials.twitterPassword,
+            this.credentials.twitterEmail
+          );
+          await this.saveCookies();
+        }
+
+        Logger.stopSpinner();
+        Logger.success("Twitter authentication successful");
+        return true;
       } catch (error) {
         retryCount++;
+        Logger.stopSpinner(false);
         Logger.warn(
-          `⚠️  Authentication attempt ${retryCount} failed: ${error.message}`
+          `Failed to initialize scraper (attempt ${retryCount}/${this.config.twitter.maxRetries}): ${error.message}`
         );
 
-        if (retryCount >= this.config.twitter.maxRetries) {
-          Logger.stopSpinner(false);
-          return false;
+        if (retryCount < this.config.twitter.maxRetries) {
+          Logger.info(`Retrying in ${this.config.twitter.retryDelay / 1000} seconds...`);
+          await new Promise((r) => setTimeout(r, this.config.twitter.retryDelay));
+        } else {
+          Logger.error(
+            `Failed to initialize scraper after ${this.config.twitter.maxRetries} attempts`
+          );
+          throw error;
         }
-
-        // Exponential backoff with jitter
-        const baseDelay = this.config.twitter.retryDelay * Math.pow(2, retryCount - 1);
-        const maxJitter = baseDelay * 0.2; // 20% jitter
-        const jitter = Math.floor(Math.random() * maxJitter);
-        await this.randomDelay(baseDelay + jitter, baseDelay + jitter + 5000);
       }
     }
-    return false;
   }
 
   async randomDelay(min, max) {
@@ -538,7 +545,10 @@ class TwitterPipeline {
         }`
       );
 
-      return Array.from(allTweets.values());
+      return {
+        tweets: Array.from(allTweets.values()),
+        user: profile
+      };
     } catch (error) {
       Logger.error(`Failed to collect tweets: ${error.message}`);
       throw error;
@@ -682,6 +692,7 @@ class TwitterPipeline {
 
   async run() {
     const startTime = Date.now();
+    this.stats.startTime = startTime;
 
     console.log("\n" + chalk.bold.blue("🐦 Twitter Data Collection Pipeline"));
     console.log(
@@ -689,147 +700,108 @@ class TwitterPipeline {
     );
 
     try {
+      // Check for required credentials
       await this.validateEnvironment();
-
-      // Initialize main scraper
+      
+      // Initialize the Twitter scraper
       const scraperInitialized = await this.initializeScraper();
+      
       if (!scraperInitialized && !this.config.fallback.enabled) {
         throw new Error(
           "Failed to initialize scraper and fallback is disabled"
         );
       }
-
-      // Start collection
-      Logger.startSpinner(`Collecting tweets from @${this.username}`);
-      const allTweets = await this.collectTweets(this.scraper);
-      Logger.stopSpinner();
-
-      if (allTweets.length === 0) {
-        Logger.warn("⚠️  No tweets collected");
-        return { tweets: [], user: null };
-      }
-
-      // Get user profile data
-      let userData = null;
-      try {
-        userData = await this.getProfile();
-        Logger.info(`Retrieved profile data for @${this.username}`);
-      } catch (error) {
-        Logger.warn(`Failed to retrieve profile data: ${error.message}`);
-      }
-
-      // Calculate basic analytics for display
-      const analytics = this.calculateBasicAnalytics(allTweets);
       
-      // Store in database
-      let dbResult = null;
-      try {
-        dbResult = await this.storeInDatabase(allTweets, userData);
-      } catch (dbError) {
-        Logger.error(`Database storage failed: ${dbError.message}`);
-        throw dbError; // Re-throw as we're only using the database for storage now
+      // Collect tweets using available methods
+      let allTweets = [];
+      let userData = null;
+      
+      // Try main scraper first
+      if (scraperInitialized) {
+        try {
+          const result = await this.collectTweets(this.scraper);
+          allTweets = result.tweets;
+          userData = result.user;
+        } catch (error) {
+          Logger.warn(`Main scraper failed: ${error.message}`);
+          
+          if (this.config.fallback.enabled) {
+            Logger.info("Switching to fallback collection method");
+            this.stats.fallbackUsed = true;
+          } else {
+            throw error;
+          }
+        }
       }
-
+      
+      // Use fallback method if needed and enabled
+      if (allTweets.length === 0 && this.config.fallback.enabled) {
+        Logger.info("Using fallback collection method");
+        this.stats.fallbackUsed = true;
+        
+        try {
+          const result = await this.collectWithFallback(`from:${this.username}`);
+          allTweets = result.tweets;
+          userData = result.user || userData;
+        } catch (fallbackError) {
+          Logger.error(`Fallback collection failed: ${fallbackError.message}`);
+          throw fallbackError;
+        }
+      }
+      
+      // Store in database if we found any tweets
+      if (allTweets.length > 0 && this.dbConnector) {
+        try {
+          await this.storeInDatabase(allTweets, userData);
+        } catch (dbError) {
+          Logger.error(`Failed to store in database: ${dbError.message}`);
+          // Continue execution, just log the error
+          await this.logError(dbError, { stage: "database_storage" });
+        }
+      }
+      
+      // Show sample of collected tweets
+      if (allTweets.length > 0) {
+        await this.showSampleTweets(allTweets);
+      } else {
+        Logger.warn("No tweets were collected");
+      }
+      
       // Calculate final statistics
       const duration = ((Date.now() - startTime) / 1000).toFixed(1);
       const tweetsPerMinute = (allTweets.length / (duration / 60)).toFixed(1);
       const successRate = (
-        (allTweets.length /
-          (this.stats.requestCount + this.stats.fallbackCount)) *
-        100
+        (allTweets.length / this.stats.requestCount) * 100 || 0
       ).toFixed(1);
-
-      // Display final results
-      Logger.stats("📈 Collection Results", {
-        "Total Tweets": allTweets.length.toLocaleString(),
-        "Original Tweets": analytics.directTweets.toLocaleString(),
-        "Replies": analytics.replies.toLocaleString(),
-        "Retweets": analytics.retweets.toLocaleString(),
-        "Date Range": `${analytics.timeRange.start} to ${analytics.timeRange.end}`,
-        "Runtime": `${duration} seconds`,
-        "Collection Rate": `${tweetsPerMinute} tweets/minute`,
-        "Success Rate": `${successRate}%`,
-        "Rate Limit Hits": this.stats.rateLimitHits.toLocaleString(),
-        "Fallback Collections": this.stats.fallbackCount.toLocaleString(),
-        "Database Storage": dbResult ? 
-          `✅ Success (${dbResult.savedCount} tweets)` : 
-          "❌ Failed"
-      });
-
-      // Content type breakdown
-      Logger.info("\n📊 Content Type Breakdown:");
-      console.log(
-        chalk.cyan(
-          `• Text Only: ${analytics.contentTypes.textOnly.toLocaleString()}`
-        )
-      );
-      console.log(
-        chalk.cyan(
-          `• With Images: ${analytics.contentTypes.withImages.toLocaleString()}`
-        )
-      );
-      console.log(
-        chalk.cyan(
-          `• With Videos: ${analytics.contentTypes.withVideos.toLocaleString()}`
-        )
-      );
-      console.log(
-        chalk.cyan(
-          `• With Links: ${analytics.contentTypes.withLinks.toLocaleString()}`
-        )
-      );
-
-      // Engagement statistics
-      Logger.info("\n💫 Engagement Statistics:");
-      console.log(
-        chalk.cyan(
-          `• Total Likes: ${analytics.engagement.totalLikes.toLocaleString()}`
-        )
-      );
-      console.log(
-        chalk.cyan(
-          `• Total Retweets: ${analytics.engagement.totalRetweetCount.toLocaleString()}`
-        )
-      );
-      console.log(
-        chalk.cyan(
-          `• Total Replies: ${analytics.engagement.totalReplies.toLocaleString()}`
-        )
-      );
-      console.log(
-        chalk.cyan(`• Average Likes: ${analytics.engagement.averageLikes}`)
-      );
-
-      // Collection method breakdown
-      if (this.stats.fallbackUsed) {
-        Logger.info("\n🔄 Collection Method Breakdown:");
-        console.log(
-          chalk.cyan(
-            `• Primary Collection: ${(
-              allTweets.length - this.stats.fallbackCount
-            ).toLocaleString()}`
-          )
-        );
-        console.log(
-          chalk.cyan(
-            `• Fallback Collection: ${this.stats.fallbackCount.toLocaleString()}`
-          )
-        );
-      }
-
-      // Cleanup
+      
+      // Display statistics
+      console.log("\n" + chalk.bold("📊 Collection Statistics:"));
+      console.log(chalk.cyan(`✓ Total Tweets: ${allTweets.length.toLocaleString()}`));
+      console.log(chalk.cyan(`✓ Duration: ${duration}s`));
+      console.log(chalk.cyan(`✓ Rate: ${tweetsPerMinute} tweets/minute`));
+      console.log(chalk.cyan(`✓ Success Rate: ${successRate}%`));
+      console.log(chalk.cyan(`✓ Fallback Used: ${this.stats.fallbackUsed ? "Yes" : "No"}`));
+      console.log("\n");
+      
+      // Clean up resources
       await this.cleanup();
-
-      // Return the tweets and user data for potential further processing
+      
       return { tweets: allTweets, user: userData };
     } catch (error) {
-      Logger.error(`Pipeline failed: ${error.message}`);
+      Logger.error(`Pipeline execution failed: ${error.message}`);
+      
+      // Log detailed error info
       await this.logError(error, {
+        username: this.username,
         stage: "pipeline_execution",
         runtime: (Date.now() - startTime) / 1000,
         stats: this.stats,
       });
+      
+      // Clean up resources
       await this.cleanup();
+      
+      // Re-throw the error for handling by the caller
       throw error;
     }
   }

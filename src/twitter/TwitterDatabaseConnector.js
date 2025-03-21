@@ -1,6 +1,7 @@
 import { AppDataSource } from '../../api/database/typeorm.config.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dbLogger from '../utils/DbLogger.js';
 
 // For ES modules support
 const __filename = fileURLToPath(import.meta.url);
@@ -22,7 +23,24 @@ class TwitterDatabaseConnector {
       // Initialize the data source if not already initialized
       if (!AppDataSource.isInitialized) {
         console.log('Initializing database connection...');
-        await AppDataSource.initialize();
+        
+        try {
+          await AppDataSource.initialize();
+        } catch (initError) {
+          console.error(`Database initialization failed: ${initError.message}`);
+          
+          // Log detailed error information
+          await dbLogger.logConnectionError(initError, {
+            action: 'initialize_database',
+            message: 'Failed to initialize database connection',
+            // Redact any sensitive info from the connection URL
+            connectionUrl: process.env.DB_URL ? 
+              process.env.DB_URL.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@') : 
+              'Using individual connection parameters'
+          });
+          
+          throw initError;
+        }
       }
       
       this.dataSource = AppDataSource;
@@ -34,6 +52,13 @@ class TwitterDatabaseConnector {
       console.log('Database connection established');
     } catch (error) {
       console.error(`Failed to initialize database: ${error.message}`);
+      
+      // Log errors obtaining repositories
+      await dbLogger.logDbError('initialize_repositories', error, {
+        message: 'Failed to initialize repositories after database connection',
+        dataSourceInitialized: AppDataSource.isInitialized
+      });
+      
       throw error;
     }
   }
@@ -41,189 +66,257 @@ class TwitterDatabaseConnector {
   async findOrCreateUser(username, userData = {}) {
     await this.initialize();
     
-    // Find existing user
-    let user = await this.userRepo.findOne({ where: { username } });
-    
-    if (!user) {
-      console.log(`Creating new user record for @${username}`);
-      user = this.userRepo.create({ username });
+    try {
+      // Find existing user
+      let user = await this.userRepo.findOne({ where: { username } });
+      
+      if (!user) {
+        console.log(`Creating new user record for @${username}`);
+        user = this.userRepo.create({ username });
+      }
+      
+      // Update user data from scraped info if provided
+      if (Object.keys(userData).length > 0) {
+        user.displayName = userData.name || userData.displayName || user.displayName;
+        user.profileImageUrl = userData.profileImageUrl || user.profileImageUrl;
+        user.bio = userData.description || userData.bio || user.bio;
+        user.location = userData.location || user.location;
+        user.url = userData.url || user.url;
+        user.followersCount = userData.followersCount || user.followersCount;
+        user.followingCount = userData.followingCount || user.followingCount;
+        user.tweetCount = userData.statusesCount || userData.tweetCount || user.tweetCount;
+        user.verified = userData.verified !== undefined ? userData.verified : user.verified;
+        user.protected = userData.protected !== undefined ? userData.protected : user.protected;
+        user.joinedAt = userData.createdAt || userData.joinedAt || user.joinedAt;
+      }
+      
+      user.lastScrapedAt = new Date();
+      
+      // Save user
+      await this.userRepo.save(user);
+      console.log(`Saved user @${username} with ID ${user.id}`);
+      
+      return user;
+    } catch (error) {
+      console.error(`Failed to save user ${username}: ${error.message}`);
+      
+      // Log detailed error information
+      await dbLogger.logDbError('find_or_create_user', error, {
+        username,
+        hasUserData: Object.keys(userData).length > 0,
+        action: 'save_user'
+      });
+      
+      throw error;
     }
-    
-    // Update user data from scraped info if provided
-    if (Object.keys(userData).length > 0) {
-      user.displayName = userData.name || userData.displayName || user.displayName;
-      user.profileImageUrl = userData.profileImageUrl || user.profileImageUrl;
-      user.bio = userData.description || userData.bio || user.bio;
-      user.location = userData.location || user.location;
-      user.url = userData.url || user.url;
-      user.followersCount = userData.followersCount || user.followersCount;
-      user.followingCount = userData.followingCount || user.followingCount;
-      user.tweetCount = userData.statusesCount || userData.tweetCount || user.tweetCount;
-      user.verified = userData.verified !== undefined ? userData.verified : user.verified;
-      user.protected = userData.protected !== undefined ? userData.protected : user.protected;
-      user.joinedAt = userData.createdAt || userData.joinedAt || user.joinedAt;
-    }
-    
-    user.lastScrapedAt = new Date();
-    
-    // Save user
-    await this.userRepo.save(user);
-    console.log(`Saved user @${username} with ID ${user.id}`);
-    
-    return user;
   }
   
   async storeTweets(username, tweets = [], userData = {}) {
     await this.initialize();
     
-    // Find or create user
-    const user = await this.findOrCreateUser(username, userData);
-    
-    if (!tweets || tweets.length === 0) {
-      console.log(`No tweets to save for user @${username}`);
-      return { user, savedCount: 0 };
-    }
-    
-    // Process tweets in batches to avoid memory issues
-    const batchSize = 100;
-    let totalSaved = 0;
-    
-    for (let i = 0; i < tweets.length; i += batchSize) {
-      const batch = tweets.slice(i, i + batchSize);
+    try {
+      // Find or create user
+      const user = await this.findOrCreateUser(username, userData);
       
-      const tweetEntities = batch.map(tweet => {
-        // Parse tweet data
-        const tweetData = this.parseTweetForDatabase(tweet, user.id);
+      if (!tweets || tweets.length === 0) {
+        console.log(`No tweets to save for user @${username}`);
+        return { user, savedCount: 0 };
+      }
+      
+      // Process tweets in batches to avoid memory issues
+      const batchSize = 100;
+      let totalSaved = 0;
+      
+      for (let i = 0; i < tweets.length; i += batchSize) {
+        const batch = tweets.slice(i, i + batchSize);
         
-        // Create tweet entity
-        return this.tweetRepo.create(tweetData);
+        try {
+          const tweetEntities = batch.map(tweet => {
+            // Parse tweet data
+            const tweetData = this.parseTweetForDatabase(tweet, user.id);
+            
+            // Create tweet entity
+            return this.tweetRepo.create(tweetData);
+          });
+          
+          // Save batch
+          await this.tweetRepo.save(tweetEntities);
+          totalSaved += tweetEntities.length;
+          
+          console.log(`Saved batch of ${tweetEntities.length} tweets, progress: ${totalSaved}/${tweets.length}`);
+        } catch (batchError) {
+          console.error(`Failed to save batch of tweets: ${batchError.message}`);
+          
+          // Log detailed error information
+          await dbLogger.logDbError('store_tweets_batch', batchError, {
+            username,
+            userId: user.id,
+            batchIndex: i / batchSize,
+            batchSize,
+            totalTweets: tweets.length,
+            tweetsProcessed: totalSaved
+          });
+          
+          // Continue with next batch
+          continue;
+        }
+      }
+      
+      console.log(`Successfully saved ${totalSaved} tweets for user @${username}`);
+      
+      return { 
+        user, 
+        savedCount: totalSaved
+      };
+    } catch (error) {
+      console.error(`Failed to store tweets for ${username}: ${error.message}`);
+      
+      // Log detailed error information
+      await dbLogger.logDbError('store_tweets', error, {
+        username,
+        tweetCount: tweets?.length || 0,
+        hasUserData: Object.keys(userData).length > 0
       });
       
-      // Save batch
-      await this.tweetRepo.save(tweetEntities);
-      totalSaved += tweetEntities.length;
-      
-      console.log(`Saved batch of ${tweetEntities.length} tweets, progress: ${totalSaved}/${tweets.length}`);
+      throw error;
     }
-    
-    console.log(`Successfully saved ${totalSaved} tweets for user @${username}`);
-    
-    return { 
-      user, 
-      savedCount: totalSaved
-    };
   }
   
   async generateAnalytics(username, userId) {
     await this.initialize();
     
-    // Find the user
-    const user = await this.userRepo.findOne({ where: { id: userId } });
-    if (!user) {
-      throw new Error(`User with ID ${userId} not found`);
-    }
-    
-    // Get all user's tweets
-    const tweets = await this.tweetRepo.find({ where: { userId } });
-    
-    if (tweets.length === 0) {
-      throw new Error(`No tweets found for user ${username}`);
-    }
-    
-    // Compute analytics
-    const analytics = {
-      userId,
-      tweetCount: tweets.length,
-      originalTweetCount: tweets.filter(t => t.type === 'original').length,
-      replyCount: tweets.filter(t => t.type === 'reply').length,
-      retweetCount: tweets.filter(t => t.type === 'retweet').length,
-      quoteCount: tweets.filter(t => t.type === 'quote').length,
-      withMediaCount: tweets.filter(t => t.media).length,
-      withImagesCount: tweets.filter(t => t.media && t.media.some(m => m.type === 'photo')).length,
-      withVideosCount: tweets.filter(t => t.media && t.media.some(m => ['video', 'animated_gif'].includes(m.type))).length,
-      withLinksCount: tweets.filter(t => t.urls).length,
-      withHashtagsCount: tweets.filter(t => t.hashtags).length,
-      withMentionsCount: tweets.filter(t => t.mentions).length,
-      
-      // Engagement metrics
-      totalLikes: tweets.reduce((sum, t) => sum + (t.likeCount || 0), 0),
-      totalRetweets: tweets.reduce((sum, t) => sum + (t.retweetCount || 0), 0),
-      totalReplies: tweets.reduce((sum, t) => sum + (t.replyCount || 0), 0),
-      totalQuotes: tweets.reduce((sum, t) => sum + (t.quoteCount || 0), 0),
-      
-      // Average engagement
-      averageLikes: tweets.length > 0 ? 
-        tweets.reduce((sum, t) => sum + (t.likeCount || 0), 0) / tweets.length : 0,
-      averageRetweets: tweets.length > 0 ? 
-        tweets.reduce((sum, t) => sum + (t.retweetCount || 0), 0) / tweets.length : 0,
-      averageReplies: tweets.length > 0 ? 
-        tweets.reduce((sum, t) => sum + (t.replyCount || 0), 0) / tweets.length : 0,
-      averageQuotes: tweets.length > 0 ? 
-        tweets.reduce((sum, t) => sum + (t.quoteCount || 0), 0) / tweets.length : 0,
-      
-      // Time metrics
-      oldestTweetDate: tweets.reduce((oldest, t) => 
-        !oldest || (t.postedAt && t.postedAt < oldest) ? t.postedAt : oldest, null),
-      newestTweetDate: tweets.reduce((newest, t) => 
-        !newest || (t.postedAt && t.postedAt > newest) ? t.postedAt : newest, null),
-      
-      // Advanced analytics
-      mostUsedHashtags: this.calculateMostUsedHashtags(tweets),
-      mostMentionedUsers: this.calculateMostMentionedUsers(tweets),
-      mostReactedTweets: this.calculateMostReactedTweets(tweets),
-      postingFrequency: this.calculatePostingFrequency(tweets),
-      postingDayDistribution: this.calculatePostingDayDistribution(tweets),
-      postingTimeDistribution: this.calculatePostingTimeDistribution(tweets),
-      languageDistribution: this.calculateLanguageDistribution(tweets),
-      
-      // Metadata
-      lastUpdated: new Date(),
-    };
-    
     try {
-      // Use a transaction to handle potential race conditions with unique constraints
-      await this.dataSource.transaction(async transactionalEntityManager => {
-        // Find existing analytics or create new one
-        let analyticsEntity = await transactionalEntityManager.findOne('Analytics', { where: { userId } });
-        
-        if (analyticsEntity) {
-          console.log(`Updating existing analytics for user ${username}`);
-          analyticsEntity = Object.assign(analyticsEntity, analytics);
-        } else {
-          console.log(`Creating new analytics for user ${username}`);
-          analyticsEntity = transactionalEntityManager.create('Analytics', analytics);
-        }
-        
-        await transactionalEntityManager.save('Analytics', analyticsEntity);
-      });
-      
-      console.log(`Successfully generated analytics for user ${username}`);
-      
-      return { success: true };
-    } catch (err) {
-      if (err.code === '23505' || err.message.includes('duplicate key')) {
-        console.warn(`Duplicate key constraint issue, trying upsert approach`);
-        
-        try {
-          // Try with query builder upsert
-          await this.dataSource.createQueryBuilder()
-            .insert()
-            .into('analytics')
-            .values(analytics)
-            .onConflict('("userId")')
-            .merge()
-            .execute();
-        } catch (upsertError) {
-          console.error(`Failed to upsert analytics: ${upsertError.message}`);
-          throw upsertError;
-        }
-      } else {
-        console.error(`Failed to generate analytics: ${err.message}`);
-        throw err;
+      // Find the user
+      const user = await this.userRepo.findOne({ where: { id: userId } });
+      if (!user) {
+        const error = new Error(`User with ID ${userId} not found`);
+        await dbLogger.logDbError('generate_analytics_user_not_found', error, { username, userId });
+        throw error;
       }
+      
+      // Get all user's tweets
+      const tweets = await this.tweetRepo.find({ where: { userId } });
+      
+      if (tweets.length === 0) {
+        const error = new Error(`No tweets found for user ${username}`);
+        await dbLogger.logDbError('generate_analytics_no_tweets', error, { username, userId });
+        throw error;
+      }
+      
+      // Compute analytics
+      const analytics = {
+        userId,
+        tweetCount: tweets.length,
+        originalTweetCount: tweets.filter(t => t.type === 'original').length,
+        replyCount: tweets.filter(t => t.type === 'reply').length,
+        retweetCount: tweets.filter(t => t.type === 'retweet').length,
+        quoteCount: tweets.filter(t => t.type === 'quote').length,
+        withMediaCount: tweets.filter(t => t.media).length,
+        withImagesCount: tweets.filter(t => t.media && t.media.some(m => m.type === 'photo')).length,
+        withVideosCount: tweets.filter(t => t.media && t.media.some(m => ['video', 'animated_gif'].includes(m.type))).length,
+        withLinksCount: tweets.filter(t => t.urls).length,
+        withHashtagsCount: tweets.filter(t => t.hashtags).length,
+        withMentionsCount: tweets.filter(t => t.mentions).length,
+        
+        // Engagement metrics
+        totalLikes: tweets.reduce((sum, t) => sum + (t.likeCount || 0), 0),
+        totalRetweets: tweets.reduce((sum, t) => sum + (t.retweetCount || 0), 0),
+        totalReplies: tweets.reduce((sum, t) => sum + (t.replyCount || 0), 0),
+        totalQuotes: tweets.reduce((sum, t) => sum + (t.quoteCount || 0), 0),
+        
+        // Average engagement
+        averageLikes: tweets.length > 0 ? 
+          tweets.reduce((sum, t) => sum + (t.likeCount || 0), 0) / tweets.length : 0,
+        averageRetweets: tweets.length > 0 ? 
+          tweets.reduce((sum, t) => sum + (t.retweetCount || 0), 0) / tweets.length : 0,
+        averageReplies: tweets.length > 0 ? 
+          tweets.reduce((sum, t) => sum + (t.replyCount || 0), 0) / tweets.length : 0,
+        averageQuotes: tweets.length > 0 ? 
+          tweets.reduce((sum, t) => sum + (t.quoteCount || 0), 0) / tweets.length : 0,
+        
+        // Time metrics
+        oldestTweetDate: tweets.reduce((oldest, t) => 
+          !oldest || (t.postedAt && t.postedAt < oldest) ? t.postedAt : oldest, null),
+        newestTweetDate: tweets.reduce((newest, t) => 
+          !newest || (t.postedAt && t.postedAt > newest) ? t.postedAt : newest, null),
+        
+        // Advanced analytics
+        mostUsedHashtags: this.calculateMostUsedHashtags(tweets),
+        mostMentionedUsers: this.calculateMostMentionedUsers(tweets),
+        mostReactedTweets: this.calculateMostReactedTweets(tweets),
+        postingFrequency: this.calculatePostingFrequency(tweets),
+        postingDayDistribution: this.calculatePostingDayDistribution(tweets),
+        postingTimeDistribution: this.calculatePostingTimeDistribution(tweets),
+        languageDistribution: this.calculateLanguageDistribution(tweets),
+        
+        // Metadata
+        lastUpdated: new Date(),
+      };
+      
+      try {
+        // Use a transaction to handle potential race conditions with unique constraints
+        await this.dataSource.transaction(async transactionalEntityManager => {
+          // Find existing analytics or create new one
+          let analyticsEntity = await transactionalEntityManager.findOne('Analytics', { where: { userId } });
+          
+          if (analyticsEntity) {
+            console.log(`Updating existing analytics for user ${username}`);
+            analyticsEntity = Object.assign(analyticsEntity, analytics);
+          } else {
+            console.log(`Creating new analytics for user ${username}`);
+            analyticsEntity = transactionalEntityManager.create('Analytics', analytics);
+          }
+          
+          await transactionalEntityManager.save('Analytics', analyticsEntity);
+        });
+        
+        console.log(`Successfully generated analytics for user ${username}`);
+        
+        return { success: true };
+      } catch (transactionError) {
+        await dbLogger.logDbError('analytics_transaction', transactionError, {
+          username,
+          userId,
+          tweetCount: tweets.length,
+          action: 'save_analytics'
+        });
+        
+        if (transactionError.code === '23505' || transactionError.message.includes('duplicate key')) {
+          console.warn(`Duplicate key constraint issue, trying upsert approach`);
+          
+          try {
+            // Try with query builder upsert
+            await this.dataSource.createQueryBuilder()
+              .insert()
+              .into('analytics')
+              .values(analytics)
+              .onConflict('("userId")')
+              .merge()
+              .execute();
+              
+            return { success: true };
+          } catch (upsertError) {
+            console.error(`Failed to upsert analytics: ${upsertError.message}`);
+            await dbLogger.logDbError('analytics_upsert', upsertError, {
+              username,
+              userId,
+              action: 'upsert_analytics'
+            });
+            throw upsertError;
+          }
+        } else {
+          throw transactionError;
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to generate analytics: ${error.message}`);
+      await dbLogger.logDbError('generate_analytics', error, {
+        username,
+        userId,
+        action: 'generate_analytics'
+      });
+      throw error;
     }
-    
-    return { success: true };
   }
   
   parseTweetForDatabase(tweet, userId) {
@@ -539,8 +632,20 @@ class TwitterDatabaseConnector {
   
   async close() {
     if (this.dataSource && this.dataSource.isInitialized) {
-      await this.dataSource.destroy();
-      console.log('Database connection closed');
+      try {
+        await this.dataSource.destroy();
+        console.log('Database connection closed');
+      } catch (error) {
+        console.error(`Error closing database connection: ${error.message}`);
+        
+        // Log detailed error information
+        await dbLogger.logConnectionError(error, {
+          action: 'close_connection',
+          message: 'Failed to close database connection properly'
+        });
+        
+        throw error;
+      }
     }
   }
 }

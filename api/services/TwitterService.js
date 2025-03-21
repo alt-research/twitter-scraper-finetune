@@ -15,9 +15,10 @@ class TwitterService {
    * 
    * @param {string} username - Twitter username to scrape
    * @param {Object} options - Custom options for scraping
+   * @param {Object} credentials - Optional Twitter credentials (username, password, email)
    * @returns {Object} - Job information
    */
-  async queueScrapeJob(username, options = {}) {
+  async queueScrapeJob(username, options = {}, credentials = null) {
     // Check if job for this username is already running
     const activeJobs = await this.queues.twitterScraper.getActive();
     const existingJob = activeJobs.find(job => 
@@ -42,6 +43,7 @@ class TwitterService {
       { 
         username, 
         options,
+        credentials, // Pass Twitter credentials if provided
         operation: 'scrape-twitter-user',
         storeInDatabase: true // Flag to indicate we want to store in database
       },
