@@ -13,6 +13,7 @@ const __dirname = path.dirname(__filename);
 // Create Fastify instance
 const fastify = Fastify({
   logger: {
+    level: process.env.LOG_LEVEL || 'info',
     transport: {
       target: 'pino-pretty',
       options: {
@@ -21,6 +22,16 @@ const fastify = Fastify({
       },
     },
   },
+  ajv: {
+    customOptions: {
+      removeAdditional: false,
+      useDefaults: true,
+      coerceTypes: true,
+      allErrors: true,
+      strictSchema: false,  // Allow additional keywords like "example"
+      keywords: ['example']  // Register example as a valid keyword
+    }
+  }
 });
 
 // Register plugins
@@ -33,6 +44,9 @@ async function registerPlugins() {
   
   // Queue plugin
   await fastify.register(import('./plugins/queue.js'));
+  
+  // Swagger documentation
+  await fastify.register(import('./plugins/swagger.js'));
   
   // Routes
   await fastify.register(import('./routes/twitter.js'), { prefix: '/api/twitter' });
