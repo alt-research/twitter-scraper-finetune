@@ -19,16 +19,28 @@ services:
       - REDIS_PASSWORD=
       - TWITTER_USERNAME=${TWITTER_USERNAME}
       - TWITTER_PASSWORD=${TWITTER_PASSWORD}
+      - TWITTER_EMAIL=${TWITTER_EMAIL}
       - MAX_TWEETS=50000
       - MAX_RETRIES=5
       - DEBUG=false
     volumes:
       - ./data:/usr/src/app/data
       - ./cookies:/usr/src/app/cookies
+      - ./backups:/usr/src/app/backups
+      - ./logs:/usr/src/app/logs
+      - ./db_logs:/usr/src/app/db_logs
     depends_on:
       - redis
       - postgres
     restart: unless-stopped
+    # Use the entrypoint script with migrations
+    command: ["/usr/src/app/entrypoint-with-migrations.sh"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/twitter/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   redis:
     image: redis:alpine
@@ -38,6 +50,11 @@ services:
       - redis-data:/data
     restart: unless-stopped
     command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   postgres:
     image: postgres:14-alpine
@@ -50,6 +67,11 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
 volumes:
   redis-data:
