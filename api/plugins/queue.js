@@ -50,7 +50,18 @@ async function queuePlugin(fastify, options) {
       const { default: TwitterPipeline } = await import('../../src/twitter/TwitterPipeline.js');
       
       try {
-        const pipeline = new TwitterPipeline(job.data.username);
+        // Extract Twitter credentials from options if provided
+        const credentials = {
+          username: job.data.options?.credentials?.username,
+          password: job.data.options?.credentials?.password,
+          email: job.data.options?.credentials?.email
+        };
+        
+        // Create pipeline instance with credentials and options merged
+        const pipeline = new TwitterPipeline(job.data.username, {
+          credentials,
+          ...job.data.options
+        });
         
         // Set any custom options from the job data
         if (job.data.options) {

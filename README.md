@@ -38,6 +38,38 @@ Example: `npm run twitter:db elonmusk`
 
 This will scrape tweets and store them directly in the PostgreSQL database configured in your `.env` file.
 
+#### Providing Twitter Credentials
+
+Twitter credentials can be provided in three ways:
+
+1. **Environment Variables (Default)**
+   ```
+   TWITTER_USERNAME=your_username
+   TWITTER_PASSWORD=your_password
+   TWITTER_EMAIL=your_email
+   ```
+
+2. **Command Line Arguments**
+   ```bash
+   npm run twitter:db elonmusk --credentials.username=alternate_account --credentials.password=your_password --credentials.email=your_email
+   ```
+
+3. **API Requests** (when using the REST API)
+   ```json
+   {
+     "username": "elonmusk",
+     "options": {
+       "credentials": {
+         "username": "alternate_account",
+         "password": "your_password",
+         "email": "your_email"
+       }
+     }
+   }
+   ```
+
+This flexibility allows you to use different Twitter accounts for different scraping operations without changing the `.env` file. The environment variables are used as defaults when credentials are not explicitly provided.
+
 ### Legacy Twitter Collection (deprecated)
 ```bash
 npm run twitter -- username
@@ -262,7 +294,12 @@ Request body:
   "options": {
     "maxTweets": 10000,
     "tweetTypes": ["original", "replies"],
-    "contentTypes": ["text", "images", "videos", "links"]
+    "contentTypes": ["text", "images", "videos", "links"],
+    "credentials": {
+      "username": "your_twitter_username",
+      "password": "your_twitter_password",
+      "email": "your_twitter_email"
+    }
   }
 }
 ```
@@ -379,16 +416,75 @@ volumes:
   postgres-data:
 ```
 
-## Production Deployment
+## Production Deployment with Docker
 
-For production deployments:
+For production deployments, this project includes a Docker setup that's ready to use.
 
-1. Set secure passwords in your `.env` file or environment variables
-2. Configure proper PostgreSQL credentials
-3. Consider using a managed PostgreSQL service 
-4. Set up proper backups for your database
-5. Use environment-specific configuration
-6. Set up scheduled database maintenance with cron
+### Production Docker Setup
+
+1. Build the Docker image:
+   ```bash
+   docker-compose build
+   ```
+
+2. Start all services (API, Redis, PostgreSQL):
+   ```bash
+   docker-compose up -d
+   ```
+
+3. Run with migrations (alternative):
+   
+   Edit `docker-compose.yml` to uncomment the command line for the twitter-api service:
+   ```yaml
+   command: ["/usr/src/app/entrypoint-with-migrations.sh"]
+   ```
+   
+   Then start the services:
+   ```bash
+   docker-compose up -d
+   ```
+
+### Production Configuration
+
+1. Create a `.env` file for production:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit the `.env` file with your production values:
+   - Set secure passwords for database and Redis
+   - Configure Twitter credentials
+   - Adjust scraper settings for production load
+
+3. Volume Mounts:
+   The Docker setup includes volume mounts for:
+   - `/data`: Scraped data
+   - `/cookies`: Twitter session cookies
+   - `/backups`: Database backups
+   - `/logs`: Application logs
+   - `/db_logs`: Database logs
+
+### Monitoring and Maintenance
+
+1. View logs:
+   ```bash
+   docker-compose logs -f twitter-api
+   ```
+
+2. Run database backup:
+   ```bash
+   docker-compose exec twitter-api npm run db:backup
+   ```
+
+3. Check service health:
+   ```bash
+   curl http://localhost:3000/api/twitter/health
+   ```
+
+4. Database maintenance:
+   ```bash
+   docker-compose exec twitter-api npm run db:maintenance
+   ```
 
 ## Documentation
 

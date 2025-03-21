@@ -15,19 +15,57 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
+ * Parse command line arguments
+ * @returns {Object} Parsed arguments
+ */
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const result = { _: [] };
+  
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    
+    if (arg.startsWith('--')) {
+      // Handle --key=value format
+      if (arg.includes('=')) {
+        const [key, value] = arg.substring(2).split('=');
+        result[key] = value;
+      } 
+      // Handle --key value format
+      else if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
+        const key = arg.substring(2);
+        result[key] = args[++i];
+      } 
+      // Handle --flag format (boolean flags)
+      else {
+        const key = arg.substring(2);
+        result[key] = true;
+      }
+    } 
+    // Handle positional arguments
+    else if (!arg.startsWith('-')) {
+      result._.push(arg);
+    }
+  }
+  
+  return result;
+}
+
+/**
  * Main function to run the Twitter scraper with database storage
  */
 async function main() {
   console.log(chalk.bold.cyan('\n🐦 Twitter Scraper - Database Integration Mode'));
   console.log(chalk.grey('Store Twitter data directly in the PostgreSQL database\n'));
   
+  // Parse command line arguments
+  const args = parseArgs();
+  
+  // Extract arguments
+  const maxTweets = args.maxTweets ? parseInt(args.maxTweets) : undefined;
+  
   // Check for required environment variables
-  const requiredVars = [
-    'TWITTER_EMAIL',
-    'TWITTER_USERNAME',
-    'TWITTER_PASSWORD',
-    'DATABASE_URL'
-  ];
+  const requiredVars = ['TWITTER_USERNAME', 'TWITTER_PASSWORD', 'TWITTER_EMAIL', 'DATABASE_URL'];
   
   const missingVars = requiredVars.filter(varName => !process.env[varName]);
   
@@ -36,12 +74,13 @@ async function main() {
     missingVars.forEach(varName => {
       console.log(chalk.red(`   - ${varName}`));
     });
-    console.log(chalk.yellow('\nPlease add these variables to your .env file and try again.'));
+    console.log(chalk.yellow('\nPlease add these variables to your .env file or provide credentials via the credentials object:'));
+    console.log(chalk.yellow('  --credentials.username=your_username --credentials.password=your_password --credentials.email=your_email'));
     process.exit(1);
   }
   
-  // Get username from CLI arguments or prompt
-  let username = process.argv[2];
+  // Get username from positional arguments or prompt
+  let username = args._[0];
   
   if (!username) {
     const answers = await inquirer.prompt([
@@ -62,17 +101,43 @@ async function main() {
     
     username = answers.username;
     
-    // Set environment variables based on answers
-    process.env.MAX_TWEETS = answers.maxTweets.toString();
+    // Use answers.maxTweets if available and not provided via command line
+    if (!maxTweets) {
+      process.env.MAX_TWEETS = answers.maxTweets.toString();
+    }
   }
   
-  // Create pipeline instance
-  const pipeline = new TwitterPipeline(username);
+  // Extract credentials from args if provided
+  const credentials = args.credentials || {};
+  
+  // Prepare options for the pipeline
+  const options = {
+    credentials: {
+      username: credentials.username,
+      password: credentials.password,
+      email: credentials.email
+    },
+    maxTweets
+  };
+  
+  // Create pipeline instance with options
+  const pipeline = new TwitterPipeline(username, options);
   
   try {
+    // Show what credentials we're using (but mask the password)
     console.log(chalk.yellow(`\n🔍 Starting data collection for @${username}`));
+    
+    if (options.credentials.username) {
+      console.log(chalk.grey(`Twitter Auth: ${options.credentials.username} (using provided credentials)`));
+    } else {
+      console.log(chalk.grey(`Twitter Auth: ${process.env.TWITTER_USERNAME} (using .env credentials)`));
+    }
+    
     console.log(chalk.grey(`Database: PostgreSQL (${process.env.DATABASE_URL.split('@')[1].split('/')[0]})`));
-    console.log(chalk.grey(`Max Tweets: ${process.env.MAX_TWEETS === '0' ? 'No limit' : process.env.MAX_TWEETS}\n`));
+    
+    // Display max tweets setting
+    const maxTweetsDisplay = maxTweets || process.env.MAX_TWEETS;
+    console.log(chalk.grey(`Max Tweets: ${maxTweetsDisplay === '0' ? 'No limit' : maxTweetsDisplay}\n`));
     
     // Run the pipeline
     const result = await pipeline.run();
