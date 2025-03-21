@@ -13,7 +13,8 @@ export const AppDataSource = new DataSource({
   username: process.env.DB_USERNAME || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_DATABASE || 'twitter_scraper',
-  synchronize: process.env.NODE_ENV === 'development', // Auto-create schema in development
+  // synchronize: process.env.NODE_ENV === 'development', // Auto-create schema in development
+  synchronize: false,
   logging: process.env.NODE_ENV === 'development',
   entities: [path.join(__dirname, 'entities', '*.js')],
   migrations: [path.join(__dirname, 'migrations', '*.js')],
