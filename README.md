@@ -276,6 +276,20 @@ docker-compose up -d
 
 ## API Endpoints
 
+### API Documentation
+
+The API includes interactive documentation powered by Swagger. You can access the documentation UI at:
+
+```
+http://localhost:3000/documentation
+```
+
+The documentation provides:
+- Interactive endpoints that you can try directly from the browser
+- Schema information for all requests and responses
+- Examples for each endpoint
+- API information and descriptions
+
 ### Health Check
 ```
 GET /api/twitter/health

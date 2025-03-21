@@ -11,17 +11,137 @@ async function twitterRoutes(fastify, options) {
   const twitterService = new TwitterService(fastify);
 
   // Health check route
-  fastify.get('/health', async (request, reply) => {
+  fastify.get('/health', {
+    schema: {
+      description: 'Health check endpoint for Twitter API service',
+      tags: ['health'],
+      response: {
+        200: {
+          description: 'Successful response',
+          type: 'object',
+          properties: {
+            status: { type: 'string' },
+            service: { type: 'string' }
+          },
+          examples: [
+            {
+              status: 'ok',
+              service: 'twitter-api'
+            }
+          ]
+        }
+      }
+    }
+  }, async (request, reply) => {
     return { status: 'ok', service: 'twitter-api' };
   });
 
   // Get active jobs
-  fastify.get('/jobs', async (request, reply) => {
+  fastify.get('/jobs', {
+    schema: {
+      description: 'Get statistics about all jobs in the queue',
+      tags: ['jobs'],
+      response: {
+        200: {
+          description: 'Job statistics',
+          type: 'object',
+          properties: {
+            active: { type: 'integer', description: 'Number of active jobs' },
+            waiting: { type: 'integer', description: 'Number of waiting jobs' },
+            completed: { type: 'integer', description: 'Number of completed jobs' },
+            failed: { type: 'integer', description: 'Number of failed jobs' },
+            jobs: { 
+              type: 'array', 
+              description: 'List of recent jobs',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  username: { type: 'string' },
+                  status: { type: 'string' },
+                  progress: { type: 'integer' },
+                  timestamp: { type: 'string', format: 'date-time' }
+                }
+              }
+            }
+          },
+          examples: [
+            {
+              active: 1,
+              waiting: 2,
+              completed: 10,
+              failed: 1,
+              jobs: [
+                {
+                  id: '123456',
+                  username: 'elonmusk',
+                  status: 'active',
+                  progress: 50,
+                  timestamp: '2023-01-01T00:00:00Z'
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }, async (request, reply) => {
     return await twitterService.getJobStats();
   });
 
   // Get job by ID
-  fastify.get('/jobs/:id', async (request, reply) => {
+  fastify.get('/jobs/:id', {
+    schema: {
+      description: 'Get a specific job by ID',
+      tags: ['jobs'],
+      params: {
+        type: 'object',
+        properties: {
+          id: { 
+            type: 'string', 
+            description: 'Job ID'
+          }
+        },
+        required: ['id']
+      },
+      response: {
+        200: {
+          description: 'Job details',
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            username: { type: 'string' },
+            status: { type: 'string' },
+            progress: { type: 'integer' },
+            data: { type: 'object' },
+            timestamp: { type: 'string', format: 'date-time' }
+          },
+          examples: [
+            {
+              id: '123456',
+              username: 'elonmusk',
+              status: 'active',
+              progress: 50,
+              data: { maxTweets: 1000 },
+              timestamp: '2023-01-01T00:00:00Z'
+            }
+          ]
+        },
+        404: {
+          description: 'Job not found',
+          type: 'object',
+          properties: {
+            error: { type: 'string' }
+          },
+          examples: [
+            {
+              error: 'Job not found'
+            }
+          ]
+        }
+      }
+    }
+  }, async (request, reply) => {
     const { id } = request.params;
     const job = await twitterService.getJobById(id);
     
@@ -36,20 +156,46 @@ async function twitterRoutes(fastify, options) {
   // Submit a new Twitter scraping job
   fastify.post('/scrape', {
     schema: {
+      description: 'Submit a new Twitter scraping job',
+      tags: ['scraping'],
       body: {
         type: 'object',
         required: ['username'],
         properties: {
-          username: { type: 'string', minLength: 1 },
+          username: { 
+            type: 'string', 
+            minLength: 1, 
+            description: 'Twitter username to scrape'
+          },
           options: {
             type: 'object',
+            description: 'Scraping options',
             properties: {
-              maxTweets: { type: 'integer', minimum: 1, maximum: 100000 },
-              maxRetries: { type: 'integer', minimum: 1, maximum: 10 },
-              minDelayBetweenRequests: { type: 'integer', minimum: 500 },
-              maxDelayBetweenRequests: { type: 'integer', minimum: 1000 },
+              maxTweets: { 
+                type: 'integer', 
+                minimum: 1, 
+                maximum: 100000, 
+                description: 'Maximum number of tweets to scrape'
+              },
+              maxRetries: { 
+                type: 'integer', 
+                minimum: 1, 
+                maximum: 10, 
+                description: 'Maximum number of retries for failed requests'
+              },
+              minDelayBetweenRequests: { 
+                type: 'integer', 
+                minimum: 500, 
+                description: 'Minimum delay between requests in milliseconds'
+              },
+              maxDelayBetweenRequests: { 
+                type: 'integer', 
+                minimum: 1000, 
+                description: 'Maximum delay between requests in milliseconds'
+              },
               tweetTypes: { 
                 type: 'array', 
+                description: 'Types of tweets to scrape',
                 items: { 
                   type: 'string', 
                   enum: ['original', 'replies', 'quotes', 'retweets'] 
@@ -57,6 +203,7 @@ async function twitterRoutes(fastify, options) {
               },
               contentTypes: { 
                 type: 'array', 
+                description: 'Types of content to scrape',
                 items: { 
                   type: 'string', 
                   enum: ['text', 'images', 'videos', 'links'] 
@@ -65,14 +212,89 @@ async function twitterRoutes(fastify, options) {
               // Twitter credentials
               credentials: {
                 type: 'object',
+                description: 'Twitter account credentials (preferred format)',
                 properties: {
-                  username: { type: 'string' },
-                  password: { type: 'string' },
-                  email: { type: 'string' }
+                  username: { 
+                    type: 'string', 
+                    description: 'Twitter login username'
+                  },
+                  password: { 
+                    type: 'string', 
+                    description: 'Twitter password'
+                  },
+                  email: { 
+                    type: 'string', 
+                    description: 'Twitter account email'
+                  }
                 }
+              },
+              // Legacy format (for backward compatibility)
+              twitterUsername: { 
+                type: 'string', 
+                description: 'Twitter login username (legacy format)',
+                deprecated: true 
+              },
+              twitterPassword: { 
+                type: 'string', 
+                description: 'Twitter password (legacy format)',
+                deprecated: true 
+              },
+              twitterEmail: { 
+                type: 'string', 
+                description: 'Twitter account email (legacy format)',
+                deprecated: true 
               }
             }
           }
+        },
+        examples: [
+          {
+            username: 'elonmusk',
+            options: {
+              maxTweets: 10000,
+              tweetTypes: ['original', 'replies'],
+              contentTypes: ['text', 'images'],
+              credentials: {
+                username: 'your_twitter_username',
+                password: 'your_twitter_password',
+                email: 'your_twitter_email'
+              }
+            }
+          }
+        ]
+      },
+      response: {
+        200: {
+          description: 'Job successfully queued',
+          type: 'object',
+          properties: {
+            status: { type: 'string' },
+            jobId: { type: 'string' },
+            message: { type: 'string' }
+          },
+          examples: [
+            {
+              status: 'queued',
+              jobId: '123456',
+              message: 'Scraping job started for @elonmusk'
+            }
+          ]
+        },
+        409: {
+          description: 'Job already running',
+          type: 'object',
+          properties: {
+            status: { type: 'string' },
+            jobId: { type: 'string' },
+            message: { type: 'string' }
+          },
+          examples: [
+            {
+              status: 'already_running',
+              jobId: '123456',
+              message: 'A scraping job for @elonmusk is already running'
+            }
+          ]
         }
       }
     }
@@ -90,18 +312,49 @@ async function twitterRoutes(fastify, options) {
   // Submit a tweet processing job for analytics
   fastify.post('/process', {
     schema: {
+      description: 'Submit a job to process tweets for analytics or finetuning',
+      tags: ['processing'],
       body: {
         type: 'object',
         required: ['username', 'action'],
         properties: {
-          username: { type: 'string', minLength: 1 },
+          username: { 
+            type: 'string', 
+            minLength: 1, 
+            description: 'Twitter username to process',
+            example: 'elonmusk'
+          },
           action: { 
             type: 'string', 
-            enum: ['generate-analytics', 'generate-finetuning'] 
+            enum: ['generate-analytics', 'generate-finetuning'],
+            description: 'Processing action to perform',
+            example: 'generate-analytics'
           },
           tweets: { 
             type: 'array',
-            items: { type: 'object' }
+            description: 'Optional array of tweets to process. If not provided, tweets will be loaded from the database.',
+            items: { 
+              type: 'object',
+              description: 'Tweet object'
+            }
+          }
+        }
+      },
+      response: {
+        200: {
+          description: 'Processing job successfully queued',
+          type: 'object',
+          properties: {
+            status: { type: 'string', example: 'queued' },
+            jobId: { type: 'string', example: '123456' },
+            message: { type: 'string', example: 'Processing job started for @elonmusk' }
+          }
+        },
+        400: {
+          description: 'Error processing tweets',
+          type: 'object',
+          properties: {
+            error: { type: 'string', example: 'No tweets found for processing' }
           }
         }
       }
@@ -120,23 +373,103 @@ async function twitterRoutes(fastify, options) {
   // Get tweets for a user with pagination and filters
   fastify.get('/tweets/:username', {
     schema: {
+      description: 'Get tweets for a specific user with pagination and filters',
+      tags: ['tweets'],
       params: {
         type: 'object',
         properties: {
-          username: { type: 'string' }
+          username: { 
+            type: 'string',
+            description: 'Twitter username',
+            example: 'elonmusk'
+          }
         },
         required: ['username']
       },
       querystring: {
         type: 'object',
         properties: {
-          limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
-          offset: { type: 'integer', minimum: 0, default: 0 },
-          type: { type: 'string', enum: ['original', 'reply', 'retweet', 'quote'] },
-          sortBy: { type: 'string', enum: ['postedAt', 'likeCount', 'retweetCount', 'replyCount', 'quoteCount'], default: 'postedAt' },
-          sortOrder: { type: 'string', enum: ['ASC', 'DESC'], default: 'DESC' },
-          startDate: { type: 'string', format: 'date-time' },
-          endDate: { type: 'string', format: 'date-time' }
+          limit: { 
+            type: 'integer', 
+            minimum: 1, 
+            maximum: 100, 
+            default: 20,
+            description: 'Number of tweets to return',
+            example: 20
+          },
+          offset: { 
+            type: 'integer', 
+            minimum: 0, 
+            default: 0,
+            description: 'Offset for pagination',
+            example: 0
+          },
+          type: { 
+            type: 'string', 
+            enum: ['original', 'reply', 'retweet', 'quote'],
+            description: 'Filter by tweet type',
+            example: 'original'
+          },
+          sortBy: { 
+            type: 'string', 
+            enum: ['postedAt', 'likeCount', 'retweetCount', 'replyCount', 'quoteCount'], 
+            default: 'postedAt',
+            description: 'Field to sort by',
+            example: 'postedAt'
+          },
+          sortOrder: { 
+            type: 'string', 
+            enum: ['ASC', 'DESC'], 
+            default: 'DESC',
+            description: 'Sort order',
+            example: 'DESC'
+          },
+          startDate: { 
+            type: 'string', 
+            format: 'date-time',
+            description: 'Filter tweets after this date',
+            example: '2023-01-01T00:00:00Z'
+          },
+          endDate: { 
+            type: 'string', 
+            format: 'date-time',
+            description: 'Filter tweets before this date',
+            example: '2023-12-31T23:59:59Z'
+          }
+        }
+      },
+      response: {
+        200: {
+          description: 'List of tweets',
+          type: 'object',
+          properties: {
+            data: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', example: '1234567890' },
+                  text: { type: 'string', example: 'This is a tweet' },
+                  postedAt: { type: 'string', format: 'date-time' },
+                  type: { type: 'string', example: 'original' },
+                  likeCount: { type: 'integer', example: 1000 },
+                  retweetCount: { type: 'integer', example: 500 },
+                  replyCount: { type: 'integer', example: 100 },
+                  quoteCount: { type: 'integer', example: 50 }
+                }
+              }
+            },
+            total: { type: 'integer', example: 1000 },
+            limit: { type: 'integer', example: 20 },
+            offset: { type: 'integer', example: 0 }
+          }
+        },
+        404: {
+          description: 'Tweets not found',
+          type: 'object',
+          properties: {
+            error: { type: 'string', example: 'Tweets not found for user' }
+          }
         }
       }
     }
@@ -164,7 +497,58 @@ async function twitterRoutes(fastify, options) {
   });
 
   // Get tweet analytics (if available)
-  fastify.get('/analytics/:username', async (request, reply) => {
+  fastify.get('/analytics/:username', {
+    schema: {
+      description: 'Get analytics for a specific Twitter user',
+      tags: ['analytics'],
+      params: {
+        type: 'object',
+        properties: {
+          username: { 
+            type: 'string',
+            description: 'Twitter username',
+            example: 'elonmusk'
+          }
+        },
+        required: ['username']
+      },
+      response: {
+        200: {
+          description: 'Tweet analytics',
+          type: 'object',
+          properties: {
+            username: { type: 'string', example: 'elonmusk' },
+            totalTweets: { type: 'integer', example: 1000 },
+            averageLikes: { type: 'number', example: 5000.5 },
+            averageRetweets: { type: 'number', example: 1000.2 },
+            topTopics: { 
+              type: 'array', 
+              items: { 
+                type: 'object',
+                properties: {
+                  topic: { type: 'string', example: 'space' },
+                  count: { type: 'integer', example: 200 }
+                }
+              }
+            },
+            tweetsByMonth: { 
+              type: 'object',
+              additionalProperties: { type: 'integer' },
+              example: { "2023-01": 100, "2023-02": 150 }
+            }
+          }
+        },
+        404: {
+          description: 'Analytics not found',
+          type: 'object',
+          properties: {
+            error: { type: 'string', example: 'Analytics not found' },
+            message: { type: 'string', example: 'Analytics not found. Run a scraping job first and then process the tweets with analytics' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
     try {
       const { username } = request.params;
       return await twitterService.getUserAnalytics(username);
@@ -179,7 +563,39 @@ async function twitterRoutes(fastify, options) {
   });
 
   // Cancel a job
-  fastify.delete('/jobs/:id', async (request, reply) => {
+  fastify.delete('/jobs/:id', {
+    schema: {
+      description: 'Cancel a specific job by ID',
+      tags: ['jobs'],
+      params: {
+        type: 'object',
+        properties: {
+          id: { 
+            type: 'string',
+            description: 'Job ID',
+            example: '123456'
+          }
+        },
+        required: ['id']
+      },
+      response: {
+        200: {
+          description: 'Job cancelled successfully',
+          type: 'object',
+          properties: {
+            message: { type: 'string', example: 'Job 123456 has been cancelled' }
+          }
+        },
+        404: {
+          description: 'Job not found',
+          type: 'object',
+          properties: {
+            error: { type: 'string', example: 'Job not found' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
     const { id } = request.params;
     const success = await twitterService.cancelJob(id);
     
