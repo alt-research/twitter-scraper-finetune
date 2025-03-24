@@ -4,7 +4,7 @@ import swaggerUI from '@fastify/swagger-ui';
 
 /**
  * Plugin to add Swagger documentation to the Fastify instance
- * 
+ *
  * @param {FastifyInstance} fastify - Fastify instance
  * @param {Object} options - Plugin options
  */
@@ -33,8 +33,8 @@ async function swaggerPlugin(fastify, options) {
       },
       servers: [
         {
-          url: 'http://localhost:3000',
-          description: 'Local development server'
+          url: process.env.API_BASE_URL || 'http://localhost:3000',
+          description: process.env.NODE_ENV === 'production' ? 'Production server' : 'Local development server'
         }
       ],
       components: {
@@ -72,42 +72,30 @@ async function swaggerPlugin(fastify, options) {
       operationsSorter: 'alpha'
     },
     staticCSP: true,
-    transformStaticCSP: (header) => header,
     transformSpecification: (swaggerObject) => {
-      // Transform all "example" to "examples" in the specification
+      // Transform "example" to "examples" for OpenAPI compliance
       const processObject = (obj) => {
         if (!obj || typeof obj !== 'object') return;
-        
         Object.keys(obj).forEach(key => {
-          // Process nested objects and arrays recursively
           if (obj[key] && typeof obj[key] === 'object') {
             processObject(obj[key]);
           }
-          
-          // Handle example properties for OpenAPI compatibility
           if (key === 'example' && obj.type && !obj.examples) {
-            // Move example to examples format
-            obj.examples = {
-              example1: {
-                value: obj[key]
-              }
-            };
-            // Delete original example to avoid conflicts
+            obj.examples = { example1: { value: obj[key] } };
             delete obj.example;
           }
         });
       };
-      
       processObject(swaggerObject);
       return swaggerObject;
     },
     transformSpecificationClone: true,
     theme: {
-      title: 'Twitter Scraper API Documentation',
+      title: 'Twitter Scraper API Documentation'
     }
   });
 
   fastify.log.info('Swagger documentation enabled at /documentation');
 }
 
-export default fastifyPlugin(swaggerPlugin); 
+export default fastifyPlugin(swaggerPlugin);
