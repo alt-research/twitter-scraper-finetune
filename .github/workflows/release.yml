@@ -4,7 +4,7 @@ on:
     tags: ["*"]
 
 env:
-  ECR_REPO: 305587085711.dkr.ecr.us-west-2.amazonaws.com/twitter-scrapper
+  ECR_REPO: 305587085711.dkr.ecr.us-west-2.amazonaws.com/twitter-scraper
 
 jobs:
   build_image:
