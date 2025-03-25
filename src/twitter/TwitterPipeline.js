@@ -44,6 +44,35 @@ class TwitterPipeline {
       `${this.credentials.username}_cookies.json`
     );
 
+    // Set up proxy configuration (from options or environment variables)
+    const proxyEnabled = options.proxyEnabled !== undefined ? 
+      options.proxyEnabled : 
+      (process.env.PROXY_ENABLED === 'true');
+      
+    const proxyConfig = {
+      enabled: proxyEnabled,
+      server: options.proxyServer || process.env.PROXY_SERVER,
+      username: options.proxyUsername || process.env.PROXY_USERNAME,
+      password: options.proxyPassword || process.env.PROXY_PASSWORD,
+      rotationInterval: parseInt(options.proxyRotationInterval || process.env.PROXY_ROTATION_INTERVAL) || 600,
+      pool: []
+    };
+    
+    // Set up proxy pool if provided
+    if (process.env.PROXY_POOL) {
+      proxyConfig.pool = process.env.PROXY_POOL.split(',').map(proxy => proxy.trim());
+      Logger.debug(`Loaded ${proxyConfig.pool.length} proxies from environment`);
+    } else if (options.proxyPool && Array.isArray(options.proxyPool)) {
+      proxyConfig.pool = options.proxyPool;
+      Logger.debug(`Loaded ${proxyConfig.pool.length} proxies from options`);
+    }
+    
+    // If we have a pool, make sure we pick one to start with
+    if (proxyConfig.pool.length > 0 && proxyConfig.enabled) {
+      proxyConfig.server = proxyConfig.pool[Math.floor(Math.random() * proxyConfig.pool.length)];
+      Logger.debug(`Using proxy: ${proxyConfig.server}`);
+    }
+
     // Enhanced configuration with fallback handling
     this.config = {
       twitter: {
@@ -52,7 +81,7 @@ class TwitterPipeline {
         retryDelay: parseInt(options.retryDelay || process.env.RETRY_DELAY) || 5000,
         minDelayBetweenRequests: parseInt(options.minDelay || process.env.MIN_DELAY) || 1000,
         maxDelayBetweenRequests: parseInt(options.maxDelay || process.env.MAX_DELAY) || 3000,
-        rateLimitThreshold: 3, // Number of rate limits before considering fallback
+        rateLimitThreshold: parseInt(options.rateLimitThreshold || process.env.RATE_LIMIT_THRESHOLD) || 3,
       },
       fallback: {
         enabled: options.fallbackEnabled !== undefined ? options.fallbackEnabled : true,
@@ -67,7 +96,8 @@ class TwitterPipeline {
       },
       database: {
         generateAnalytics: options.generateAnalytics !== undefined ? options.generateAnalytics : true,
-      }
+      },
+      proxy: proxyConfig
     };
 
     this.scraper = new Scraper();
@@ -85,6 +115,16 @@ class TwitterPipeline {
       newestTweetDate: null,
       fallbackUsed: false,
     };
+
+    this.rateLimitBucket = null;
+    
+    // Array of realistic user agents
+    this.userAgentIndex = null;
+    
+    // Set up proxy rotation if needed
+    if (this.config.proxy.enabled && this.config.proxy.pool.length > 0 && this.config.proxy.rotationInterval > 0) {
+      this.setupProxyRotation();
+    }
   }
 
   async initializeFallback() {
@@ -167,104 +207,208 @@ class TwitterPipeline {
   }
 
   async initializeScraper() {
-    Logger.startSpinner("Initializing Twitter scraper");
-    let retryCount = 0;
+    try {
+      // Prepare puppeteer arguments
+      const launchOptions = {
+        headless: this.config.headless,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu'
+        ]
+      };
 
-    // Try loading cookies first
-    if (await this.loadCookies()) {
-      try {
-        if (await this.scraper.isLoggedIn()) {
-          Logger.success("✅ Successfully authenticated with saved cookies");
-          Logger.stopSpinner();
-          return true;
+      // Add proxy configuration if provided
+      if (this.config.proxy && this.config.proxy.enabled) {
+        const { server, username, password } = this.config.proxy;
+        if (server) {
+          Logger.info(`Using proxy server: ${server}`);
+          
+          // Add proxy argument
+          if (username && password) {
+            launchOptions.args.push(`--proxy-server=${server}`);
+            // We'll handle auth in the page.authenticate call after browser launch
+          } else {
+            launchOptions.args.push(`--proxy-server=${server}`);
+          }
         }
-      } catch (error) {
-        Logger.warn("Saved cookies are invalid, attempting fresh login");
       }
-    }
 
-    // Verify all required credentials are present
-    const username = this.credentials.username;
-    const password = this.credentials.password;
-    const email = this.credentials.email;
-
-    if (!username || !password || !email) {
-      Logger.error("Missing required credentials. Need username, password, AND email");
-      Logger.stopSpinner(false);
-      return false;
-    }
-
-    // Attempt login with email verification
-    while (retryCount < this.config.twitter.maxRetries) {
-      try {
-        // Add random delay before login attempt
-        await this.randomDelay(5000, 10000);
-
-        // Always use email in login attempt
-        await this.scraper.login(username, password, email);
-
-        // Verify login success
-        const isLoggedIn = await this.scraper.isLoggedIn();
-        if (isLoggedIn) {
-          await this.saveCookies();
-          Logger.success("✅ Successfully authenticated with Twitter");
-          Logger.stopSpinner();
-          return true;
-        } else {
-          throw new Error("Login verification failed");
+      Logger.info("Initializing Twitter client...");
+      this.scraper = new Scraper();
+      
+      // Pass additional options for proxy authentication if needed
+      const initOptions = {
+        puppeteerOptions: launchOptions,
+        setupPageCallback: async (page) => {
+          // Handle proxy authentication if credentials provided
+          if (this.config.proxy && this.config.proxy.enabled && 
+              this.config.proxy.username && this.config.proxy.password) {
+            await page.authenticate({
+              username: this.config.proxy.username,
+              password: this.config.proxy.password
+            });
+          }
+          
+          // Additional page setup as needed
+          await page.setRequestInterception(true);
+          page.on('request', (req) => {
+            // Block unnecessary resources to speed up scraping
+            const resourceType = req.resourceType();
+            if (resourceType === 'image' || resourceType === 'media' || 
+                resourceType === 'font' || resourceType === 'stylesheet') {
+              req.abort();
+            } else {
+              req.continue();
+            }
+          });
         }
+      };
 
-      } catch (error) {
-        retryCount++;
-        Logger.warn(
-          `⚠️  Authentication attempt ${retryCount} failed: ${error.message}`
-        );
+      // Initialize with our custom options
+      await this.scraper.initialize(initOptions);
 
-        if (retryCount >= this.config.twitter.maxRetries) {
-          Logger.stopSpinner(false);
-          return false;
-        }
+      // Load cookies if available
+      await this.loadCookies();
 
-        // Exponential backoff with jitter
-        const baseDelay = this.config.twitter.retryDelay * Math.pow(2, retryCount - 1);
-        const maxJitter = baseDelay * 0.2; // 20% jitter
-        const jitter = Math.floor(Math.random() * maxJitter);
-        await this.randomDelay(baseDelay + jitter, baseDelay + jitter + 5000);
+      // Attempt to login
+      await this.scraper.login(this.credentials.username, this.credentials.password);
+      await this.saveCookies();
+      Logger.success("Twitter client initialized and logged in successfully");
+      return true;
+    } catch (error) {
+      Logger.error("Failed to initialize Twitter client:", error);
+      await this.logError(error, { method: "initializeScraper" });
+      
+      // If initialization fails, try fallback method
+      if (this.config.fallback.enabled) {
+        Logger.warn("Attempting to initialize fallback scraping method...");
+        return await this.initializeFallback();
       }
+      
+      throw error;
     }
-    return false;
   }
 
   async randomDelay(min, max) {
-    // Gaussian distribution for more natural delays
+    // Ensure reasonable defaults
+    min = min || this.config.twitter.minDelayBetweenRequests;
+    max = max || this.config.twitter.maxDelayBetweenRequests;
+    
+    // Basic sanity check
+    if (min > max) {
+      [min, max] = [max, min];
+    }
+    
+    // Use token bucket rate limiting if available
+    if (this.rateLimitBucket) {
+      // Check if we have enough tokens
+      if (this.rateLimitBucket.tokens < 1) {
+        // Not enough tokens, calculate time needed for 1 token
+        const timeNeededMs = (1 - this.rateLimitBucket.tokens) / this.rateLimitBucket.refillRate;
+        Logger.debug(`Rate limit budget exhausted. Waiting ${Math.round(timeNeededMs/1000)}s for token refill`);
+        await new Promise(resolve => setTimeout(resolve, timeNeededMs + 100)); // Add small buffer
+        
+        // Update tokens after waiting
+        const now = Date.now();
+        const elapsed = now - this.rateLimitBucket.lastRefill;
+        this.rateLimitBucket.tokens += elapsed * this.rateLimitBucket.refillRate;
+        this.rateLimitBucket.lastRefill = now;
+      }
+      
+      // Consume a token
+      this.rateLimitBucket.tokens -= 1;
+    }
+
+    // Generate a more realistic human-like random delay using Gaussian distribution
     const gaussianRand = () => {
-      let rand = 0;
-      for (let i = 0; i < 6; i++) rand += Math.random();
-      return rand / 6;
+      let u = 0, v = 0;
+      while (u === 0) u = Math.random(); // Converting [0,1) to (0,1)
+      while (v === 0) v = Math.random();
+      let num = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+      
+      // Convert from normal distribution to desired range
+      // Using 3 standard deviations covers 99.7% of the distribution
+      num = num / 3.0;  
+      num = num + 0.5;  // Center at 0.5
+      
+      // Keep within [0, 1]
+      if (num > 1) return 1;
+      if (num < 0) return 0;
+      return num;
     };
 
-    const delay = Math.floor(min + gaussianRand() * (max - min));
-    Logger.info(`Waiting ${(delay / 1000).toFixed(1)} seconds...`);
+    // Bias toward the lower end with occasional longer delays (more human-like)
+    let rand = Math.pow(gaussianRand(), 1.5); // Power makes distribution favor lower values
+    const delay = Math.floor(min + rand * (max - min));
+    
+    // Update stats
+    this.stats.requestCount++;
+    
+    // Periodic logging of our request rate (every 10 requests)
+    if (this.stats.requestCount % 10 === 0) {
+      const elapsedMinutes = (Date.now() - this.stats.startTime) / 60000;
+      const requestsPerMinute = this.stats.requestCount / elapsedMinutes;
+      Logger.debug(`Current rate: ${requestsPerMinute.toFixed(1)} requests/minute`);
+    }
+    
     await new Promise(resolve => setTimeout(resolve, delay));
   }
 
   async handleRateLimit(retryCount = 1) {
     this.stats.rateLimitHits++;
-    const baseDelay = 60000; // 1 minute
-    const maxDelay = 15 * 60 * 1000; // 15 minutes
-
-    // Exponential backoff with small jitter
-    const exponentialDelay = baseDelay * Math.pow(2, retryCount - 1);
-    const jitter = Math.random() * 0.1 * exponentialDelay; // 10% jitter
-    const delay = Math.min(exponentialDelay + jitter, maxDelay);
-
-    Logger.warn(
-      `⚠️  Rate limit hit - waiting ${
-        delay / 1000
-      } seconds (attempt ${retryCount})`
+    
+    // Check if we should switch to fallback method after multiple rate limits
+    if (this.stats.rateLimitHits >= this.config.twitter.rateLimitThreshold && 
+        this.config.fallback.enabled && !this.stats.fallbackUsed) {
+      Logger.warn(`Rate limit threshold reached (${this.stats.rateLimitHits} hits). Switching to fallback method.`);
+      this.stats.fallbackUsed = true;
+      await this.initializeFallback();
+      return retryCount;
+    }
+    
+    // Calculate exponential backoff with jitter
+    const baseDelay = 60000; // 1 minute base delay
+    const exponentialFactor = Math.pow(1.5, retryCount - 1);
+    const waitTime = baseDelay * exponentialFactor;
+    const maxWait = 30 * 60 * 1000; // 30 minutes max
+    
+    // Add random jitter (±30%) to avoid synchronized requests
+    const jitterFactor = 0.3; // 30% jitter
+    const jitter = (Math.random() * 2 - 1) * waitTime * jitterFactor;
+    
+    const actualWait = Math.min(waitTime + jitter, maxWait);
+    const waitMinutes = Math.round(actualWait / 60000);
+    
+    Logger.warn(`⏱ Rate limit detected. Waiting ~${waitMinutes} minutes before retry ${retryCount}`);
+    
+    // Implement token bucket algorithm to track our rate limit "budget"
+    if (!this.rateLimitBucket) {
+      this.rateLimitBucket = {
+        tokens: 50,          // Start with full tokens
+        lastRefill: Date.now(),
+        maxTokens: 50,       // Maximum capacity
+        refillRate: 5/60000  // Tokens per millisecond (5 tokens per minute)
+      };
+    }
+    
+    // Refill tokens based on time elapsed
+    const now = Date.now();
+    const timeElapsed = now - this.rateLimitBucket.lastRefill;
+    const newTokens = timeElapsed * this.rateLimitBucket.refillRate;
+    
+    this.rateLimitBucket.tokens = Math.min(
+      this.rateLimitBucket.maxTokens,
+      this.rateLimitBucket.tokens + newTokens
     );
-
-    await this.randomDelay(delay, delay * 1.1);
+    this.rateLimitBucket.lastRefill = now;
+    
+    Logger.debug(`Rate limit tokens remaining: ${Math.floor(this.rateLimitBucket.tokens)}`);
+    
+    await new Promise(resolve => setTimeout(resolve, actualWait));
+    return retryCount + 1;
   }
 
   processTweetData(tweet) {
@@ -925,6 +1069,73 @@ class TwitterPipeline {
     } catch (error) {
       Logger.warn(`⚠️  Cleanup error: ${error.message}`);
     }
+  }
+
+  // Array of realistic user agents
+  getUserAgent() {
+    const userAgents = [
+      // Chrome on macOS
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+      // Chrome on Windows
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+      // Firefox on macOS
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/113.0',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/114.0',
+      // Firefox on Windows
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0',
+      // Safari on macOS
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15',
+      // Edge on Windows
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.57'
+    ];
+    
+    // If we haven't set the user agent index yet, initialize it randomly
+    if (!this.userAgentIndex) {
+      this.userAgentIndex = Math.floor(Math.random() * userAgents.length);
+    } else {
+      // Otherwise rotate through them sequentially
+      this.userAgentIndex = (this.userAgentIndex + 1) % userAgents.length;
+    }
+    
+    return userAgents[this.userAgentIndex];
+  }
+  
+  // Apply the user agent to a puppeteer page
+  async applyUserAgent(page) {
+    const userAgent = this.getUserAgent();
+    await page.setUserAgent(userAgent);
+    Logger.debug(`Set user agent: ${userAgent.substring(0, 50)}...`);
+  }
+
+  // Setup automatic proxy rotation
+  setupProxyRotation() {
+    if (this.proxyRotationInterval) {
+      clearInterval(this.proxyRotationInterval);
+    }
+    
+    this.proxyRotationInterval = setInterval(() => {
+      if (this.config.proxy.pool.length > 0) {
+        const oldProxy = this.config.proxy.server;
+        
+        // Pick a different proxy from the pool
+        let newProxy;
+        do {
+          newProxy = this.config.proxy.pool[Math.floor(Math.random() * this.config.proxy.pool.length)];
+        } while (newProxy === oldProxy && this.config.proxy.pool.length > 1);
+        
+        this.config.proxy.server = newProxy;
+        Logger.info(`Rotated proxy: ${oldProxy} → ${newProxy}`);
+      }
+    }, this.config.proxy.rotationInterval * 1000);
+    
+    // Clean up interval on process exit
+    process.on('exit', () => {
+      if (this.proxyRotationInterval) {
+        clearInterval(this.proxyRotationInterval);
+      }
+    });
   }
 }
 
