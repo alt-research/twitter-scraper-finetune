@@ -6,6 +6,28 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Get environment variables
+const nodeEnv = process.env.NODE_ENV || 'development';
+console.log(`Current NODE_ENV: ${nodeEnv}`);
+
+// Check if PostgreSQL SSL should be explicitly disabled (useful for Docker environments)
+const postgresSSLOverride = process.env.POSTGRES_SSL === 'false' ? false : null;
+
+// Configure SSL based on environment and override
+let sslConfig;
+if (postgresSSLOverride !== null) {
+  // Use the override if provided
+  sslConfig = postgresSSLOverride;
+  console.log('Using PostgreSQL SSL override:', postgresSSLOverride);
+} else {
+  // Otherwise use environment-based default
+  sslConfig = nodeEnv === 'production' 
+    ? { rejectUnauthorized: false } 
+    : false;
+}
+
+console.log(`SSL configuration: ${JSON.stringify(sslConfig)}`);
+
 export const AppDataSource = new DataSource({
   type: 'postgres',
   host: process.env.DB_HOST || 'localhost',
@@ -13,13 +35,13 @@ export const AppDataSource = new DataSource({
   username: process.env.DB_USERNAME || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_DATABASE || 'twitter_scraper',
-  // synchronize: process.env.NODE_ENV === 'development', // Auto-create schema in development
+  // synchronize: nodeEnv === 'development', // Auto-create schema in development
   synchronize: false,
-  logging: process.env.NODE_ENV === 'development',
+  logging: nodeEnv === 'development',
   entities: [path.join(__dirname, 'entities', '*.js')],
   migrations: [path.join(__dirname, 'migrations', '*.js')],
   migrationsRun: false,
-  ssl: { rejectUnauthorized: false },
+  ssl: sslConfig,
   subscribers: [],
 });
 
