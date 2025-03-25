@@ -85,6 +85,9 @@ class TwitterPipeline {
       newestTweetDate: null,
       fallbackUsed: false,
     };
+
+    // New behavior state tracking
+    this.behaviorState = null;
   }
 
   async initializeFallback() {
@@ -236,15 +239,127 @@ class TwitterPipeline {
   }
 
   async randomDelay(min, max) {
-    // Gaussian distribution for more natural delays
-    const gaussianRand = () => {
-      let rand = 0;
-      for (let i = 0; i < 6; i++) rand += Math.random();
-      return rand / 6;
-    };
+    // Ensure reasonable defaults
+    min = min || this.config.twitter.minDelayBetweenRequests;
+    max = max || this.config.twitter.maxDelayBetweenRequests;
 
-    const delay = Math.floor(min + gaussianRand() * (max - min));
-    Logger.info(`Waiting ${(delay / 1000).toFixed(1)} seconds...`);
+    // Human behavior is not uniform or purely Gaussian - it's more complex
+    // Key behaviors to simulate:
+    // 1. Micro-pauses (quick scanning)
+    // 2. Reading pauses (content consumption)
+    // 3. Thinking pauses (deciding what to do next)
+    // 4. Occasional long breaks (distraction or task switching)
+
+    let delay;
+    
+    // Initialize behavioral state if not exists
+    if (!this.behaviorState) {
+      this.behaviorState = {
+        readingSpeed: Math.random() * 0.5 + 0.7, // Reading speed modifier (0.7-1.2)
+        attentionSpan: Math.random() * 20 + 10,  // Attention span in actions
+        actionCount: 0,                          // Actions taken so far
+        lastActionType: null,                    // Type of last action
+        timeSinceBreak: 0,                       // Actions since last long break
+        breakThreshold: Math.floor(Math.random() * 30) + 30, // Actions before likely break
+        sessionIntensity: Math.random()          // How "focused" this session is (0-1)
+      };
+    }
+    
+    // Update behavior state
+    this.behaviorState.actionCount++;
+    this.behaviorState.timeSinceBreak++;
+    
+    // Determine the type of delay to use
+    const actionTypes = ['scan', 'read', 'think', 'break'];
+    let actionWeights;
+    
+    // Weights depend on previous action (for realistic sequences)
+    if (this.behaviorState.lastActionType === 'scan') {
+      actionWeights = [0.3, 0.5, 0.15, 0.05]; // After scanning, likely to read
+    } else if (this.behaviorState.lastActionType === 'read') {
+      actionWeights = [0.4, 0.2, 0.3, 0.1];  // After reading, might scan again or think
+    } else if (this.behaviorState.lastActionType === 'think') {
+      actionWeights = [0.6, 0.2, 0.1, 0.1];  // After thinking, likely to scan
+    } else if (this.behaviorState.lastActionType === 'break') {
+      actionWeights = [0.7, 0.2, 0.1, 0];    // After a break, almost always scan
+    } else {
+      // Initial action
+      actionWeights = [0.6, 0.2, 0.15, 0.05];
+    }
+    
+    // Adjust break probability based on time since last break
+    if (this.behaviorState.timeSinceBreak > this.behaviorState.breakThreshold) {
+      // Increase likelihood of taking a break
+      actionWeights[3] += 0.2;
+      // Normalize weights
+      const sum = actionWeights.reduce((a, b) => a + b, 0);
+      actionWeights = actionWeights.map(w => w / sum);
+    }
+    
+    // Select action type based on weights
+    const rand = Math.random();
+    let cumulativeWeight = 0;
+    let selectedActionIndex = 0;
+    
+    for (let i = 0; i < actionWeights.length; i++) {
+      cumulativeWeight += actionWeights[i];
+      if (rand <= cumulativeWeight) {
+        selectedActionIndex = i;
+        break;
+      }
+    }
+    
+    const actionType = actionTypes[selectedActionIndex];
+    this.behaviorState.lastActionType = actionType;
+    
+    // Calculate delay based on action type
+    if (actionType === 'scan') {
+      // Quick scanning (lower end of range)
+      delay = min + Math.random() * (min * 0.8);
+    } else if (actionType === 'read') {
+      // Reading (mid-range)
+      const baseReadingTime = min + (max - min) * 0.4;
+      delay = baseReadingTime * this.behaviorState.readingSpeed;
+    } else if (actionType === 'think') {
+      // Thinking (higher end of range)
+      delay = min + (max - min) * (0.6 + Math.random() * 0.3);
+    } else if (actionType === 'break') {
+      // Taking a break (occasional long pauses)
+      delay = max * (1 + Math.random() * 1.5); // Up to 2.5x the max
+      this.behaviorState.timeSinceBreak = 0; // Reset break counter
+    }
+    
+    // Apply a natural variation (small jitter)
+    delay *= 0.85 + Math.random() * 0.3; // ±15% variation
+    
+    // If we're close to being rate limited, slow down
+    if (this.stats.rateLimitHits > 0) {
+      // Gradually slow down as we hit more rate limits
+      const slowdownFactor = 1 + (this.stats.rateLimitHits * 0.2);
+      delay *= slowdownFactor;
+      
+      if (this.stats.rateLimitHits > 1) {
+        Logger.debug(`Slowing down by ${Math.round((slowdownFactor-1)*100)}% due to previous rate limits`);
+      }
+    }
+    
+    // Log with appropriate verbosity based on delay length
+    if (delay > max) {
+      Logger.info(`Taking a ${(delay / 1000).toFixed(1)}s break...`);
+    } else {
+      Logger.debug(`Waiting ${(delay / 1000).toFixed(1)}s (${actionType})`);
+    }
+    
+    // Update stats
+    this.stats.requestCount++;
+    
+    // Periodic logging of our request rate
+    if (this.stats.requestCount % 10 === 0) {
+      const elapsedMinutes = (Date.now() - this.stats.startTime) / 60000;
+      const requestsPerMinute = this.stats.requestCount / elapsedMinutes;
+      Logger.info(`Current rate: ${requestsPerMinute.toFixed(1)} requests/minute`);
+    }
+    
     await new Promise(resolve => setTimeout(resolve, delay));
   }
 
