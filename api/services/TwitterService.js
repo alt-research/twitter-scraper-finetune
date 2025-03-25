@@ -377,6 +377,125 @@ class TwitterService {
     
     return true;
   }
+
+  /**
+   * Get tweets for a user using the tweets_view
+   * 
+   * @param {string} username - Twitter username
+   * @param {Object} options - Query options (limit, offset, type, etc.)
+   * @returns {Object} - Tweets with pagination info
+   */
+  async getTweetsFromView(username = null, options = {}) {
+    const {
+      limit = 20,
+      offset = 0,
+      fromId = null,
+      toId = null,
+      type = null,
+      sortBy = 'incrementalId',
+      sortOrder = 'DESC',
+      tweetId = null,
+      replyToTweetId = null
+    } = options;
+
+    // Build query
+    const queryBuilder = this.repositories.tweetsView
+      .createQueryBuilder('tweetsView');
+    
+    // Apply filters
+    if (username) {
+      queryBuilder.andWhere('tweetsView.username = :username', { username });
+    }
+    
+    if (type) {
+      queryBuilder.andWhere('tweetsView.type = :type', { type });
+    }
+
+    if (tweetId) {
+      queryBuilder.andWhere('tweetsView.tweetId = :tweetId', { tweetId });
+    }
+
+    if (replyToTweetId) {
+      queryBuilder.andWhere('tweetsView.replyToTweetId = :replyToTweetId', { replyToTweetId });
+    }
+
+    // Apply incrementalId range filter if provided
+    if (fromId !== null && !isNaN(fromId)) {
+      queryBuilder.andWhere('tweetsView.incrementalId >= :fromId', { fromId });
+    }
+    
+    if (toId !== null && !isNaN(toId)) {
+      queryBuilder.andWhere('tweetsView.incrementalId <= :toId', { toId });
+    }
+    
+    // Add ordering
+    queryBuilder.orderBy(`tweetsView.${sortBy}`, sortOrder);
+    
+    // If no incrementalId range is specified, apply limit and offset
+    if (fromId === null && toId === null) {
+      queryBuilder.skip(offset).take(limit);
+    } else {
+      // When using incrementalId range, we don't apply skip/take by default
+      // but we still respect the limit if specified
+      if (limit) {
+        queryBuilder.take(limit);
+      }
+    }
+
+    // Execute query with count
+    const [tweets, total] = await queryBuilder.getManyAndCount();
+
+    return {
+      data: tweets,
+      pagination: {
+        total,
+        offset,
+        limit,
+        fromId: fromId || null,
+        toId: toId || null,
+        hasMore: offset + tweets.length < total,
+      }
+    };
+  }
+
+  /**
+   * Get the min and max incrementalId range from the tweets_view
+   * 
+   * @param {string} username - Optional Twitter username to filter by
+   * @returns {Object} - Min and max incrementalId information
+   */
+  async getTweetsViewIdRange(username = null) {
+    // Build query to get min and max incrementalId
+    const queryBuilder = this.repositories.tweetsView
+      .createQueryBuilder('tweetsView')
+      .select('MIN(tweetsView.incrementalId)', 'minId')
+      .addSelect('MAX(tweetsView.incrementalId)', 'maxId')
+      .addSelect('COUNT(tweetsView.id)', 'totalTweets');
+    
+    // Filter by username if provided
+    if (username) {
+      queryBuilder.where('tweetsView.username = :username', { username });
+    }
+    
+    // Execute raw query
+    const result = await queryBuilder.getRawOne();
+    
+    // Convert values to numbers (they come as strings from raw query)
+    const minId = result.minId !== null ? parseInt(result.minId) : null;
+    const maxId = result.maxId !== null ? parseInt(result.maxId) : null;
+    const totalTweets = parseInt(result.totalTweets) || 0;
+    
+    if (totalTweets === 0 || minId === null || maxId === null) {
+      throw new Error(`No tweets found${username ? ` for user @${username}` : ''}`);
+    }
+    
+    return {
+      username: username || null,
+      minId,
+      maxId,
+      totalTweets
+    };
+  }
 }
 
 export default TwitterService; 
