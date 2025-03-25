@@ -609,7 +609,7 @@ class TwitterPipeline {
       const result = await this.dbConnector.storeTweets(this.username, tweets, userData);
       
       Logger.stopSpinner();
-      Logger.success(`✅ Successfully stored ${result.savedCount} tweets in database`);
+      Logger.success(`✅ Successfully stored ${result.savedCount} tweets in database, skipped ${result.skippedCount || 0} existing tweets`);
       
       // Generate analytics if configured
       if (this.config.database.generateAnalytics && result.user && result.user.id) {
@@ -763,7 +763,7 @@ class TwitterPipeline {
         "Rate Limit Hits": this.stats.rateLimitHits.toLocaleString(),
         "Fallback Collections": this.stats.fallbackCount.toLocaleString(),
         "Database Storage": dbResult ? 
-          `✅ Success (${dbResult.savedCount} tweets)` : 
+          `✅ Success (${dbResult.savedCount} saved, ${dbResult.skippedCount || 0} skipped)` : 
           "❌ Failed"
       });
 

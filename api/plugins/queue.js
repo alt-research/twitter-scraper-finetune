@@ -2,6 +2,7 @@ import fp from 'fastify-plugin';
 import { Queue, Worker, QueueEvents } from 'bullmq';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { In } from 'typeorm';
 
 // For ES modules support
 const __filename = fileURLToPath(import.meta.url);
@@ -76,15 +77,20 @@ async function queuePlugin(fastify, options) {
         const { tweets, user: scrapedUserData } = await pipeline.run();
         
         // Store in database if flag is set
+        let dbResult = null;
         if (job.data.storeInDatabase) {
-          await storeTweetsInDatabase(fastify, job.data.username, tweets, scrapedUserData);
+          dbResult = await storeTweetsInDatabase(fastify, job.data.username, tweets, scrapedUserData);
         }
         
         // Return the results
         return {
           status: 'success',
           username: job.data.username,
-          tweetCount: tweets?.length || 0
+          tweetCount: tweets?.length || 0,
+          database: dbResult ? {
+            savedCount: dbResult.savedCount,
+            skippedCount: dbResult.skippedCount || 0
+          } : null
         };
       } catch (error) {
         fastify.log.error(`Failed to scrape tweets for @${job.data.username}: ${error.message}`);
@@ -191,35 +197,89 @@ async function storeTweetsInDatabase(fastify, username, tweets = [], userData = 
     await userRepo.save(user);
     fastify.log.info(`Saved user ${username} with ID ${user.id}`);
     
+    // Extract all tweet IDs for more efficient lookup
+    const allTweetIds = tweets.map(tweet => tweet.id_str || tweet.id);
+    
+    // Find existing tweets to avoid duplicates
+    const existingTweets = await tweetRepo.find({
+      where: { tweetId: In(allTweetIds) },
+      select: ['tweetId']
+    }).then(results => new Set(results.map(t => t.tweetId)));
+    
+    fastify.log.info(`Found ${existingTweets.size} existing tweets that will be skipped`);
+    
     // Process tweets in batches to avoid memory issues
     const batchSize = 100;
     let totalSaved = 0;
+    let totalSkipped = 0;
     
     for (let i = 0; i < tweets.length; i += batchSize) {
       const batch = tweets.slice(i, i + batchSize);
+      const batchEntities = [];
       
       // Process each tweet in batch
-      const tweetEntities = batch.map(tweet => {
+      for (const tweet of batch) {
+        const tweetId = tweet.id_str || tweet.id;
+        
+        // Skip if tweet already exists in database
+        if (existingTweets.has(tweetId)) {
+          totalSkipped++;
+          continue;
+        }
+        
         // Parse tweet data
         const tweetData = parseTweetForDatabase(tweet, user.id);
         
         // Create tweet entity
-        return tweetRepo.create(tweetData);
-      });
+        batchEntities.push(tweetRepo.create(tweetData));
+      }
       
-      // Save batch
-      await tweetRepo.save(tweetEntities);
-      totalSaved += tweetEntities.length;
-      
-      fastify.log.info(`Saved batch of ${tweetEntities.length} tweets, progress: ${totalSaved}/${tweets.length}`);
+      if (batchEntities.length > 0) {
+        // Save batch
+        try {
+          await tweetRepo.save(batchEntities);
+          totalSaved += batchEntities.length;
+          
+          fastify.log.info(`Saved batch of ${batchEntities.length} tweets, progress: ${totalSaved}/${tweets.length - totalSkipped}`);
+        } catch (error) {
+          // Check if it's a unique constraint violation
+          if (error.code === '23505' || error.message.includes('duplicate key') || error.message.includes('unique constraint')) {
+            fastify.log.warn(`Encountered duplicate tweets in batch. Switching to one-by-one processing.`);
+            
+            // Fall back to one-by-one processing for this batch
+            for (const entity of batchEntities) {
+              try {
+                await tweetRepo.save(entity);
+                totalSaved++;
+              } catch (saveError) {
+                if (saveError.code === '23505' || saveError.message.includes('duplicate key') || saveError.message.includes('unique constraint')) {
+                  fastify.log.debug(`Skipped duplicate tweet: ${entity.tweetId}`);
+                  totalSkipped++;
+                } else {
+                  // Re-throw any other error
+                  throw saveError;
+                }
+              }
+            }
+            
+            fastify.log.info(`Completed one-by-one processing. Progress: ${totalSaved}/${tweets.length - totalSkipped}`);
+          } else {
+            // Re-throw any other error
+            throw error;
+          }
+        }
+      } else {
+        fastify.log.info(`No new tweets to save in this batch, all were duplicates`);
+      }
     }
     
-    fastify.log.info(`Successfully saved ${totalSaved} tweets for user ${username}`);
+    fastify.log.info(`Successfully saved ${totalSaved} tweets for user ${username}, skipped ${totalSkipped} existing tweets`);
     
     return {
       status: 'success',
       username,
-      savedTweets: totalSaved
+      savedCount: totalSaved,
+      skippedCount: totalSkipped
     };
   } catch (error) {
     fastify.log.error(`Failed to store tweets in database: ${error.message}`);
