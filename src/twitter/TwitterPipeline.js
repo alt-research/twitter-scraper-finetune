@@ -828,8 +828,8 @@ class TwitterPipeline {
         );
       }
 
-      // Cleanup
-      await this.cleanup();
+      // Do a partial cleanup that leaves the database connection intact
+      await this.partialCleanup();
 
       // Return the tweets and user data for potential further processing
       return { tweets: allTweets, user: userData };
@@ -840,7 +840,9 @@ class TwitterPipeline {
         runtime: (Date.now() - startTime) / 1000,
         stats: this.stats,
       });
-      await this.cleanup();
+      
+      // Do a partial cleanup that leaves the database connection intact
+      await this.partialCleanup();
       throw error;
     }
   }
@@ -876,6 +878,27 @@ class TwitterPipeline {
 
     // Log error to console only since we're not using the file system
     console.error('Pipeline Error Log:', JSON.stringify(errorLog, null, 2));
+  }
+
+  // New method for partial cleanup that doesn't close the database connection
+  async partialCleanup() {
+    try {
+      // Cleanup main scraper
+      if (this.scraper) {
+        await this.scraper.logout();
+        Logger.success("🔒 Logged out of primary system");
+      }
+
+      // Cleanup fallback system
+      if (this.cluster) {
+        await this.cluster.close();
+        Logger.success("🔒 Cleaned up fallback system");
+      }
+      
+      Logger.success("✨ Partial cleanup complete (database connection preserved)");
+    } catch (error) {
+      Logger.warn(`⚠️  Cleanup error: ${error.message}`);
+    }
   }
 
   async cleanup() {

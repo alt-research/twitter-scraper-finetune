@@ -146,20 +146,56 @@ async function twitterRoutes(fastify, options) {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            username: { type: 'string' },
-            status: { type: 'string' },
-            progress: { type: 'integer' },
-            data: { type: 'object' },
-            timestamp: { type: 'string', format: 'date-time' }
+            data: { 
+              type: 'object',
+              description: 'Job data including username and operation'
+            },
+            state: { 
+              type: 'string',
+              description: 'Current state of the job (active, completed, failed, etc.)'
+            },
+            createdAt: { 
+              type: 'string', 
+              format: 'date-time',
+              description: 'When the job was created'
+            },
+            processedOn: { 
+              type: ['string', 'null'], 
+              format: 'date-time',
+              description: 'When the job started processing'
+            },
+            finishedOn: { 
+              type: ['string', 'null'], 
+              format: 'date-time',
+              description: 'When the job finished processing'
+            },
+            progress: { 
+              type: 'integer',
+              description: 'Job progress (0-100)'
+            },
+            attemptsMade: { 
+              type: 'integer',
+              description: 'Number of attempts made to process this job'
+            },
+            result: { 
+              type: ['object', 'null'],
+              description: 'Result data if the job has completed'
+            }
           },
           examples: [
             {
               id: '123456',
-              username: 'elonmusk',
-              status: 'active',
+              data: { 
+                username: 'elonmusk',
+                operation: 'scrape-twitter-user'
+              },
+              state: 'active',
+              createdAt: '2023-01-01T00:00:00Z',
+              processedOn: '2023-01-01T00:00:01Z',
+              finishedOn: null,
               progress: 50,
-              data: { maxTweets: 1000 },
-              timestamp: '2023-01-01T00:00:00Z'
+              attemptsMade: 1,
+              result: null
             }
           ]
         },
