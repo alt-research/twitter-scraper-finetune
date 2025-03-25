@@ -743,6 +743,215 @@ async function twitterRoutes(fastify, options) {
       message: `Job ${id} has been cancelled`
     };
   });
+
+  // Get tweets for a user with pagination and filters from the tweets_view
+  fastify.get('/tweets-view', {
+    schema: {
+      description: 'Get tweets from tweets_view with joined username data. Supports multiple pagination methods: offset-based or range-based using incrementalId.',
+      tags: ['tweets'],
+      querystring: {
+        type: 'object',
+        properties: {
+          username: { 
+            type: 'string',
+            description: 'Twitter username (optional, can fetch tweets from all users)',
+            example: 'elonmusk'
+          },
+          limit: { 
+            type: 'integer', 
+            minimum: 1, 
+            maximum: 100, 
+            default: 20,
+            description: 'Number of tweets to return',
+            example: 20
+          },
+          offset: { 
+            type: 'integer', 
+            minimum: 0, 
+            default: 0,
+            description: 'Offset for pagination (not used when fromId/toId are specified)',
+            example: 0
+          },
+          fromId: {
+            type: 'integer',
+            description: 'Start of incrementalId range for efficient range-based pagination (inclusive)',
+            example: 1000
+          },
+          toId: {
+            type: 'integer',
+            description: 'End of incrementalId range for efficient range-based pagination (inclusive)',
+            example: 2000
+          },
+          type: { 
+            type: 'string', 
+            enum: ['original', 'reply', 'retweet', 'quote'],
+            description: 'Filter by tweet type',
+            example: 'original'
+          },
+          sortBy: { 
+            type: 'string', 
+            enum: ['incrementalId', 'tweetId'], 
+            default: 'incrementalId',
+            description: 'Field to sort by',
+            example: 'incrementalId'
+          },
+          sortOrder: { 
+            type: 'string', 
+            enum: ['ASC', 'DESC'], 
+            default: 'DESC',
+            description: 'Sort order',
+            example: 'DESC'
+          },
+          tweetId: {
+            type: 'string',
+            description: 'Filter by specific tweet ID',
+            example: '1234567890'
+          },
+          replyToTweetId: {
+            type: 'string',
+            description: 'Filter by tweets replying to this tweet ID',
+            example: '1234567890'
+          }
+        }
+      },
+      response: {
+        200: {
+          description: 'List of tweets with user information and pagination details',
+          type: 'object',
+          properties: {
+            data: {
+              type: 'array',
+              description: 'Array of tweets from the view',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', example: '1234567890', description: 'UUID of the tweet record' },
+                  incrementalId: { type: 'integer', example: 12345, description: 'Auto-incrementing ID for efficient pagination' },
+                  tweetId: { type: 'string', example: '1234567890', description: 'Twitter\'s original tweet ID' },
+                  username: { type: 'string', example: 'elonmusk', description: 'Twitter username of the tweet author' },
+                  text: { type: 'string', example: 'This is a tweet', description: 'Tweet text (may be truncated)' },
+                  fullText: { type: 'string', example: 'This is a tweet with extended text', description: 'Full tweet text (not truncated)' },
+                  lang: { type: 'string', example: 'en', description: 'Language code of the tweet' },
+                  type: { type: 'string', example: 'original', description: 'Type of tweet: original, reply, retweet, or quote' },
+                  replyToTweetId: { type: 'string', example: '9876543210', description: 'ID of the tweet this is replying to (if a reply)' }
+                }
+              }
+            },
+            pagination: {
+              type: 'object',
+              description: 'Pagination metadata for navigating through results',
+              properties: {
+                total: { type: 'integer', example: 1000, description: 'Total number of tweets matching the criteria' },
+                limit: { type: 'integer', example: 20, description: 'Number of tweets per page' },
+                offset: { type: 'integer', example: 0, description: 'Current offset (for offset-based pagination)' },
+                fromId: { type: 'integer', example: 1000, description: 'Start of incrementalId range (for range-based pagination)' },
+                toId: { type: 'integer', example: 2000, description: 'End of incrementalId range (for range-based pagination)' },
+                hasMore: { type: 'boolean', example: true, description: 'Whether there are more tweets available' }
+              }
+            }
+          }
+        },
+        500: {
+          description: 'Server error',
+          type: 'object',
+          properties: {
+            error: { type: 'string', example: 'Failed to get tweets from view', description: 'Error message' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { username, limit, offset, fromId, toId, type, sortBy, sortOrder, tweetId, replyToTweetId } = request.query;
+      
+      const tweets = await twitterService.getTweetsFromView(username, {
+        limit: parseInt(limit) || 20,
+        offset: parseInt(offset) || 0,
+        fromId: fromId ? parseInt(fromId) : null,
+        toId: toId ? parseInt(toId) : null,
+        type,
+        sortBy: sortBy || 'incrementalId',
+        sortOrder: sortOrder || 'DESC',
+        tweetId,
+        replyToTweetId
+      });
+      
+      return tweets;
+    } catch (error) {
+      fastify.log.error(`Failed to get tweets from view: ${error.message}`);
+      reply.code(500);
+      return { error: error.message };
+    }
+  });
+
+  // Get tweets view ID range for a user (or all tweets)
+  fastify.get('/tweets-view/range', {
+    schema: {
+      description: 'Get min and max incrementalId values for tweets in the tweets_view, to support efficient range-based pagination.',
+      tags: ['tweets'],
+      querystring: {
+        type: 'object',
+        properties: {
+          username: { 
+            type: 'string',
+            description: 'Twitter username (optional, can fetch range for all tweets when omitted)',
+            example: 'elonmusk'
+          }
+        }
+      },
+      response: {
+        200: {
+          description: 'Min and max incrementalId information for range-based pagination',
+          type: 'object',
+          properties: {
+            username: { 
+              type: ['string', 'null'], 
+              example: 'elonmusk',
+              description: 'Username if filtered, null if range is for all tweets'
+            },
+            minId: { 
+              type: 'integer', 
+              example: 1000,
+              description: 'Smallest incrementalId in the range (use as fromId parameter)'
+            },
+            maxId: { 
+              type: 'integer', 
+              example: 5000,
+              description: 'Largest incrementalId in the range (use as toId parameter)'
+            },
+            totalTweets: { 
+              type: 'integer', 
+              example: 3500,
+              description: 'Total number of tweets in the specified range'
+            }
+          }
+        },
+        404: {
+          description: 'No tweets found matching the criteria',
+          type: 'object',
+          properties: {
+            error: { 
+              type: 'string', 
+              example: 'No tweets found for user @elonmusk',
+              description: 'Error message explaining why no tweets were found'
+            }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { username } = request.query;
+      
+      const range = await twitterService.getTweetsViewIdRange(username || null);
+      
+      return range;
+    } catch (error) {
+      fastify.log.error(`Failed to get tweets view ID range: ${error.message}`);
+      reply.code(404);
+      return { error: error.message };
+    }
+  });
 }
 
 export default twitterRoutes; 

@@ -25,6 +25,9 @@ async function databasePlugin(fastify, options) {
       },
       get analytics() {
         return dataSource.getRepository('Analytics');
+      },
+      get tweetsView() {
+        return dataSource.getRepository('TweetsView');
       }
     });
     
