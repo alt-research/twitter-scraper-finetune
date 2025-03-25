@@ -476,4 +476,267 @@ For production deployments, this project includes a Docker setup that's ready to
 3. Run with migrations (alternative):
    
    Edit `docker-compose.yml` to uncomment the command line for the twitter-api service:
+   ```yaml
+   # Use the entrypoint script with migrations
+   command: ["/usr/src/app/entrypoint-with-migrations.sh"]
    ```
+
+### Quick Testing in Production-Like Environment
+
+To quickly test in a production-like environment, use our convenient setup script:
+
+```bash
+./scripts/production-test-setup.sh
+```
+
+For more details on testing in production, see the [Testing Production Setup with Docker](#testing-production-setup-with-docker) section below.
+
+## Testing Production Setup with Docker
+
+This section provides detailed instructions for testing your Twitter Scraper API in a production-like environment using Docker.
+
+### Using the Automated Setup Script
+
+For the quickest setup, you can use our automated script:
+
+```bash
+# Make the script executable first if needed
+chmod +x scripts/production-test-setup.sh
+
+# Run the setup script
+./scripts/production-test-setup.sh
+```
+
+This script will:
+1. Create a `.env.production` file if it doesn't exist
+2. Build the Docker images with production settings
+3. Start all required services
+4. Verify service health
+5. Offer to run database migrations
+6. Test the API health endpoint
+7. Provide next steps for testing
+
+### Manual Setup
+
+If you prefer to set up the test environment manually, follow these steps:
+
+### Prerequisites
+
+- Docker and Docker Compose installed
+- Git repository cloned
+- Twitter account credentials available
+
+### Step 1: Prepare Environment Variables
+
+1. Create a production environment file:
+   ```bash
+   cp .env.example .env.production
+   ```
+
+2. Configure the production environment variables:
+   ```
+   # API Configuration
+   PORT=3000
+   HOST=0.0.0.0
+   NODE_ENV=production
+   
+   # Database Configuration - Docker services use these names
+   DB_HOST=postgres
+   DB_PORT=5432
+   DB_USERNAME=postgres
+   DB_PASSWORD=postgres  # Use a strong password in real production
+   DB_DATABASE=twitter_scraper
+   POSTGRES_SSL=false    # Disable SSL for Docker PostgreSQL
+   
+   # Redis Configuration - Docker service name
+   REDIS_HOST=redis
+   REDIS_PORT=6379
+   REDIS_PASSWORD=       # Set a password if needed
+   
+   # Twitter Credentials
+   TWITTER_USERNAME=your_twitter_username
+   TWITTER_PASSWORD=your_twitter_password
+   TWITTER_EMAIL=your_twitter_email
+   
+   # Twitter Scraper Configuration
+   MAX_TWEETS=1000       # Lower for testing
+   MAX_RETRIES=3
+   RETRY_DELAY=5000
+   MIN_DELAY=1000
+   MAX_DELAY=3000
+   
+   # Debug
+   DEBUG=false
+   ```
+
+### Step 2: Build and Start Services
+
+1. Build the Docker images:
+   ```bash
+   docker-compose --env-file .env.production build
+   ```
+
+2. Start the services:
+   ```bash
+   docker-compose --env-file .env.production up -d
+   ```
+
+3. Check the services status:
+   ```bash
+   docker-compose ps
+   ```
+
+### Step 3: Run Database Migrations
+
+1. Run migrations manually:
+   ```bash
+   docker-compose exec twitter-api npm run migrations:run
+   ```
+
+   Alternatively, you can enable automatic migrations by modifying `docker-compose.yml` before starting:
+   ```yaml
+   command: ["/usr/src/app/entrypoint-with-migrations.sh"]
+   ```
+
+2. Verify the database setup:
+   ```bash
+   docker-compose exec postgres psql -U postgres -d twitter_scraper -c "\dt;"
+   ```
+
+### Step 4: Test API Functionality
+
+1. Check API health:
+   ```bash
+   curl http://localhost:3000/api/twitter/health
+   ```
+
+2. Access Swagger documentation:
+   ```
+   http://localhost:3000/documentation
+   ```
+
+3. Start a test scraping job:
+   ```bash
+   curl -X POST "http://localhost:3000/api/twitter/scrape" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "username": "elonmusk",
+       "options": {
+         "maxTweets": 100,
+         "tweetTypes": ["original"],
+         "contentTypes": ["text"]
+       }
+     }'
+   ```
+
+4. Check job status:
+   ```bash
+   curl http://localhost:3000/api/twitter/jobs
+   ```
+
+5. Retrieve job details by ID (use the ID from the previous response):
+   ```bash
+   curl http://localhost:3000/api/twitter/jobs/twitter-elonmusk-1234567890123
+   ```
+
+### Step 5: Monitor Logs and Performance
+
+1. Check API logs:
+   ```bash
+   docker-compose logs -f twitter-api
+   ```
+
+2. Monitor PostgreSQL logs:
+   ```bash
+   docker-compose logs -f postgres
+   ```
+
+3. Monitor Redis logs:
+   ```bash
+   docker-compose logs -f redis
+   ```
+
+4. Check container resource usage:
+   ```bash
+   docker stats
+   ```
+
+### Step 6: Test Database Backup and Restore
+
+1. Create a database backup:
+   ```bash
+   docker-compose exec twitter-api ./scripts/backup-db.sh
+   ```
+
+2. List available backups:
+   ```bash
+   docker-compose exec twitter-api ls -la /usr/src/app/backups
+   ```
+
+3. Test restore (if needed - careful, this will overwrite your database):
+   ```bash
+   docker-compose exec twitter-api ./scripts/restore-db.sh /usr/src/app/backups/twitter_scraper_backup_DATE.sql.gz
+   ```
+
+### Step 7: Test for Production Readiness
+
+1. Test API response under load (using [wrk](https://github.com/wg/wrk)):
+   ```bash
+   wrk -t2 -c10 -d30s http://localhost:3000/api/twitter/health
+   ```
+
+2. Verify persistence after restart:
+   ```bash
+   docker-compose down
+   docker-compose --env-file .env.production up -d
+   curl http://localhost:3000/api/twitter/jobs  # Should show previous jobs
+   ```
+
+3. Test graceful shutdown:
+   ```bash
+   docker-compose down -t 30  # Give containers 30 seconds to shutdown
+   ```
+
+### Common Issues & Troubleshooting
+
+1. **Database Connection Issues**
+   - Verify PostgreSQL is running: `docker-compose ps postgres`
+   - Check connection variables: `DB_HOST`, `DB_PORT`, etc.
+   - Check logs: `docker-compose logs postgres`
+
+2. **Redis Connection Issues**
+   - Verify Redis is running: `docker-compose ps redis`
+   - Check connection variables: `REDIS_HOST`, `REDIS_PORT`
+   - Check logs: `docker-compose logs redis`
+
+3. **API Not Starting**
+   - Check logs for errors: `docker-compose logs twitter-api`
+   - Verify dependencies are available
+   - Check if migrations ran successfully
+
+4. **"No such file or directory" errors**
+   - Ensure volume mappings are correct in `docker-compose.yml`
+   - Verify required directories exist in the container
+
+5. **Tweet Scraping Failures**
+   - Check Twitter credentials
+   - Verify network connectivity
+   - Check for rate limiting in logs
+   - Try with a smaller `maxTweets` value
+
+### Cleanup
+
+When you're done testing, clean up all resources:
+
+```bash
+# Stop and remove containers
+docker-compose down
+
+# Remove volumes (optional, will delete all data)
+docker-compose down -v
+
+# Remove unused images
+docker image prune -a
+```
+
+For even more detailed instructions on testing the production environment, including performance testing, security considerations, and a production-ready checklist, please refer to the [Production Testing Guide](docs/PRODUCTION_TESTING.md).
