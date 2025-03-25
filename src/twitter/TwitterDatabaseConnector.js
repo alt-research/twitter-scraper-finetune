@@ -1,6 +1,7 @@
 import { AppDataSource } from '../../api/database/typeorm.config.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { In } from 'typeorm';
 
 // For ES modules support
 const __filename = fileURLToPath(import.meta.url);
@@ -84,33 +85,88 @@ class TwitterDatabaseConnector {
       return { user, savedCount: 0 };
     }
     
+    // Extract all tweet IDs for more efficient lookup
+    const allTweetIds = tweets.map(tweet => tweet.id_str || tweet.id);
+    
+    // Find existing tweets to avoid duplicates
+    const existingTweets = await this.tweetRepo.find({
+      where: { tweetId: In(allTweetIds) },
+      select: ['tweetId']
+    }).then(results => new Set(results.map(t => t.tweetId)));
+    
+    console.log(`Found ${existingTweets.size} existing tweets that will be skipped`);
+    
     // Process tweets in batches to avoid memory issues
     const batchSize = 100;
     let totalSaved = 0;
+    let totalSkipped = 0;
     
     for (let i = 0; i < tweets.length; i += batchSize) {
       const batch = tweets.slice(i, i + batchSize);
+      const batchEntities = [];
       
-      const tweetEntities = batch.map(tweet => {
+      // Process each tweet in batch
+      for (const tweet of batch) {
+        const tweetId = tweet.id_str || tweet.id;
+        
+        // Skip if tweet already exists in database
+        if (existingTweets.has(tweetId)) {
+          totalSkipped++;
+          continue;
+        }
+        
         // Parse tweet data
         const tweetData = this.parseTweetForDatabase(tweet, user.id);
         
         // Create tweet entity
-        return this.tweetRepo.create(tweetData);
-      });
+        batchEntities.push(this.tweetRepo.create(tweetData));
+      }
       
-      // Save batch
-      await this.tweetRepo.save(tweetEntities);
-      totalSaved += tweetEntities.length;
-      
-      console.log(`Saved batch of ${tweetEntities.length} tweets, progress: ${totalSaved}/${tweets.length}`);
+      if (batchEntities.length > 0) {
+        try {
+          // Save batch
+          await this.tweetRepo.save(batchEntities);
+          totalSaved += batchEntities.length;
+          
+          console.log(`Saved batch of ${batchEntities.length} tweets, progress: ${totalSaved}/${tweets.length - totalSkipped}`);
+        } catch (error) {
+          // Check if it's a unique constraint violation
+          if (error.code === '23505' || error.message.includes('duplicate key') || error.message.includes('unique constraint')) {
+            console.warn(`Encountered duplicate tweets in batch. Switching to one-by-one processing.`);
+            
+            // Fall back to one-by-one processing for this batch
+            for (const entity of batchEntities) {
+              try {
+                await this.tweetRepo.save(entity);
+                totalSaved++;
+              } catch (saveError) {
+                if (saveError.code === '23505' || saveError.message.includes('duplicate key') || saveError.message.includes('unique constraint')) {
+                  console.debug(`Skipped duplicate tweet: ${entity.tweetId}`);
+                  totalSkipped++;
+                } else {
+                  // Re-throw any other error
+                  throw saveError;
+                }
+              }
+            }
+            
+            console.log(`Completed one-by-one processing. Progress: ${totalSaved}/${tweets.length - totalSkipped}`);
+          } else {
+            // Re-throw any other error
+            throw error;
+          }
+        }
+      } else {
+        console.log(`No new tweets to save in this batch, all were duplicates`);
+      }
     }
     
-    console.log(`Successfully saved ${totalSaved} tweets for user @${username}`);
+    console.log(`Successfully saved ${totalSaved} tweets for user @${username}, skipped ${totalSkipped} existing tweets`);
     
     return { 
       user, 
-      savedCount: totalSaved
+      savedCount: totalSaved,
+      skippedCount: totalSkipped
     };
   }
   
