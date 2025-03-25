@@ -271,7 +271,34 @@ Docker Compose (all services):
 docker-compose up -d
 
 # To start with migrations, modify the docker-compose.yml command:
-# command: ["/usr/src/app/docker-entrypoint-with-migrations.sh"]
+# command: ["/usr/src/app/entrypoint-with-migrations.sh"]
+```
+
+## Environment Configuration
+
+### Database SSL Configuration
+
+The application supports configuring PostgreSQL SSL connections through environment variables:
+
+- `NODE_ENV`: Determines the default SSL behavior
+  - `development`: SSL is disabled by default
+  - `production`: SSL is enabled by default with `{ rejectUnauthorized: false }`
+
+- `POSTGRES_SSL`: Can be used to override the default SSL behavior
+  - Set to `false` for environments where PostgreSQL doesn't support SSL (like Docker)
+  - Leave unset to use the environment-based defaults
+
+Example in `.env` for a development environment without SSL:
+```
+NODE_ENV=development
+POSTGRES_SSL=
+```
+
+Example in `docker-compose.yml` for a production Docker environment:
+```yaml
+environment:
+  - NODE_ENV=production
+  - POSTGRES_SSL=false  # Disable SSL for Docker PostgreSQL
 ```
 
 ## API Endpoints
@@ -449,109 +476,4 @@ For production deployments, this project includes a Docker setup that's ready to
 3. Run with migrations (alternative):
    
    Edit `docker-compose.yml` to uncomment the command line for the twitter-api service:
-   ```yaml
-   command: ["/usr/src/app/entrypoint-with-migrations.sh"]
    ```
-   
-   Then start the services:
-   ```bash
-   docker-compose up -d
-   ```
-
-### Production Configuration
-
-1. Create a `.env` file for production:
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Edit the `.env` file with your production values:
-   - Set secure passwords for database and Redis
-   - Configure Twitter credentials
-   - Adjust scraper settings for production load
-
-3. Volume Mounts:
-   The Docker setup includes volume mounts for:
-   - `/data`: Scraped data
-   - `/cookies`: Twitter session cookies
-   - `/backups`: Database backups
-   - `/logs`: Application logs
-   - `/db_logs`: Database logs
-
-### Monitoring and Maintenance
-
-1. View logs:
-   ```bash
-   docker-compose logs -f twitter-api
-   ```
-
-2. Run database backup:
-   ```bash
-   docker-compose exec twitter-api npm run db:backup
-   ```
-
-3. Check service health:
-   ```bash
-   curl http://localhost:3000/api/twitter/health
-   ```
-
-4. Database maintenance:
-   ```bash
-   docker-compose exec twitter-api npm run db:maintenance
-   ```
-
-## Documentation
-
-- [Local Development](docs/LOCAL_DEVELOPMENT.md) - Instructions for setting up a local development environment
-- [Database Management](docs/DATABASE.md) - Detailed information about database setup, backups, and maintenance
-
-## License
-
-MIT
-
-## Database Integration
-
-This project now uses PostgreSQL as its primary data store. All Twitter data scraped with the `twitter:db` command is stored directly in the database, making it immediately available to the API.
-
-### Running with Database Integration
-
-To use the database integration:
-
-1. Make sure your PostgreSQL database is set up and running (see PostgreSQL Setup section)
-2. Ensure your `.env` file includes the `DATABASE_URL` variable pointing to your database
-3. Run the Twitter scraper with database integration:
-
-```bash
-# Run with interactive prompts
-npm run twitter:db
-
-# Or specify a username directly
-npm run twitter:db elonmusk
-```
-
-The script will:
-- Scrape tweets from the specified account
-- Store user data, tweets, and analytics in the database
-- Generate analytics for the user's tweets
-
-### Database Schema Integration
-
-The scraper integrates with the following database tables:
-
-- **users**: Stores information about Twitter users
-- **tweets**: Stores all collected tweets with their metadata
-- **analytics**: Stores computed analytics for each user
-
-### API Access
-
-Once data is stored in the database, you can access it through the API:
-
-```bash
-# Start the API server
-npm run dev
-
-# Access data through endpoints like:
-# - GET /api/twitter/users/:username
-# - GET /api/twitter/tweets/:username
-# - GET /api/twitter/analytics/:username
-```

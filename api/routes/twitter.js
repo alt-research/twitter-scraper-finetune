@@ -36,6 +36,14 @@ async function twitterRoutes(fastify, options) {
     return { status: 'ok', service: 'twitter-api' };
   });
 
+  // Debug route with no schema validation
+  fastify.get('/debug-jobs', async (request, reply) => {
+    const data = await twitterService.getJobStats();
+    // Log the actual structure for debugging
+    console.log('DEBUG JOB STRUCTURE:', JSON.stringify(data, null, 2));
+    return data;
+  });
+
   // Get active jobs
   fastify.get('/jobs', {
     schema: {
@@ -51,16 +59,34 @@ async function twitterRoutes(fastify, options) {
             completed: { type: 'integer', description: 'Number of completed jobs' },
             failed: { type: 'integer', description: 'Number of failed jobs' },
             jobs: { 
-              type: 'array', 
-              description: 'List of recent jobs',
-              items: {
-                type: 'object',
-                properties: {
-                  id: { type: 'string' },
-                  username: { type: 'string' },
-                  status: { type: 'string' },
-                  progress: { type: 'integer' },
-                  timestamp: { type: 'string', format: 'date-time' }
+              type: 'object', 
+              description: 'Jobs by status',
+              properties: {
+                active: {
+                  type: 'array',
+                  description: 'List of active jobs',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      username: { type: 'string' },
+                      operation: { type: 'string' },
+                      createdAt: { type: 'string', format: 'date-time' }
+                    }
+                  }
+                },
+                waiting: {
+                  type: 'array',
+                  description: 'List of waiting jobs',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string' },
+                      username: { type: 'string' },
+                      operation: { type: 'string' },
+                      createdAt: { type: 'string', format: 'date-time' }
+                    }
+                  }
                 }
               }
             }
@@ -71,22 +97,32 @@ async function twitterRoutes(fastify, options) {
               waiting: 2,
               completed: 10,
               failed: 1,
-              jobs: [
-                {
-                  id: '123456',
-                  username: 'elonmusk',
-                  status: 'active',
-                  progress: 50,
-                  timestamp: '2023-01-01T00:00:00Z'
-                }
-              ]
+              jobs: {
+                active: [
+                  {
+                    id: '123456',
+                    username: 'elonmusk',
+                    operation: 'scrape-twitter-user',
+                    createdAt: '2023-01-01T00:00:00Z'
+                  }
+                ],
+                waiting: [
+                  {
+                    id: '234567',
+                    username: 'jack',
+                    operation: 'scrape-twitter-user',
+                    createdAt: '2023-01-01T00:00:00Z'
+                  }
+                ]
+              }
             }
           ]
         }
       }
     }
   }, async (request, reply) => {
-    return await twitterService.getJobStats();
+    const data = await twitterService.getJobStats();
+    return data;
   });
 
   // Get job by ID

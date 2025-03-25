@@ -23,6 +23,7 @@ services:
       - MAX_TWEETS=50000
       - MAX_RETRIES=5
       - DEBUG=false
+      - POSTGRES_SSL=false
     volumes:
       - ./data:/usr/src/app/data
       - ./cookies:/usr/src/app/cookies

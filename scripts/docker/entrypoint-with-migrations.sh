@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Set NODE_ENV explicitly
+export NODE_ENV=production
+
 # Wait for PostgreSQL
 while ! pg_isready -h ${DB_HOST:-postgres} -p ${DB_PORT:-5432} -U ${DB_USERNAME:-postgres}; do
   echo "Waiting for PostgreSQL to be ready..."
@@ -25,7 +28,8 @@ fi
 echo "All dependencies are ready, running migrations..."
 
 # Run migrations
-npm run migrations:run
+echo "NODE_ENV is set to: $NODE_ENV"
+NODE_ENV=production npm run migrations:run
 
 # Check if migrations were successful
 if [ $? -ne 0 ]; then
