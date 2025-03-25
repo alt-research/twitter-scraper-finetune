@@ -179,13 +179,13 @@ class TwitterService {
           id: job.id,
           username: job.data.username,
           operation: job.data.operation,
-          createdAt: job.timestamp
+          createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null
         })),
         waiting: waitingJobs.map(job => ({
           id: job.id,
           username: job.data.username,
           operation: job.data.operation,
-          createdAt: job.timestamp
+          createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null
         }))
       }
     };
@@ -212,9 +212,9 @@ class TwitterService {
       id: job.id,
       data: job.data,
       state: await job.getState(),
-      createdAt: job.timestamp,
-      processedOn: job.processedOn,
-      finishedOn: job.finishedOn,
+      createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null,
+      processedOn: job.processedOn ? new Date(job.processedOn).toISOString() : null,
+      finishedOn: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
       progress: job.progress,
       attemptsMade: job.attemptsMade,
       result: job.returnvalue
