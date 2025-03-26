@@ -166,26 +166,27 @@ async function queuePlugin(fastify, options) {
       // Import TwitterPipeline dynamically
       const { default: TwitterPipeline } = await import('../../src/twitter/TwitterPipeline.js');
       
+      // Check immediately if this job should be processed at all
+      const nonRetriableKey = `non-retriable:${job.id}`;
+      const isNonRetriable = await fastify.redis.get(nonRetriableKey);
+      
+      if (isNonRetriable) {
+        // Job was previously marked as non-retriable
+        // Instead of throwing an error, let's finalize this job without running it
+        fastify.log.warn(`Job ${job.id} was previously marked as non-retriable and will not run`);
+        
+        // Intentionally skip this job by returning a completed status that shows it was skipped
+        return {
+          status: 'skipped',
+          reason: 'Previously marked as non-retriable',
+          username: job.data.username
+        };
+      }
+      
       // Setup collection timeout detection (30 seconds of no progress = rate limited)
       const timeout = setupCollectionTimeout(job, fastify, 30000);
       
       try {
-        // Check if this job was previously marked as non-retriable
-        const nonRetriableKey = `non-retriable:${job.id}`;
-        const isNonRetriable = await fastify.redis.get(nonRetriableKey);
-        
-        if (isNonRetriable) {
-          timeout.clearTimeout();
-          fastify.log.warn(`Job ${job.id} was previously marked as non-retriable, failing immediately`);
-          throw new Error(JSON.stringify(createJobFailure("Job was previously marked as non-retriable", {
-            type: 'non-retriable',
-            shouldRetry: false,
-            details: {
-              username: job.data.username
-            }
-          })));
-        }
-        
         // Check if the job has previously been marked as rate-limited
         const progressKey = `progress:${job.id}`;
         const progressData = await fastify.redis.get(progressKey);
@@ -410,10 +411,13 @@ async function queuePlugin(fastify, options) {
     fastify.log.info(`Twitter scraper job ${job.id} completed successfully`);
   });
 
-  twitterScraperWorker.on('failed', (job, err) => {
+  twitterScraperWorker.on('failed', async (job, err) => {
     fastify.log.error(`Twitter scraper job ${job?.id} failed: ${err.message}`);
     
     try {
+      // If job is null or undefined, nothing we can do
+      if (!job) return;
+      
       let shouldDiscard = false;
       let failureType = 'general';
       
@@ -450,29 +454,70 @@ async function queuePlugin(fastify, options) {
       
       // If we should discard the job
       if (shouldDiscard) {
-        // Force the job to fail completely by moving it to failed with attempts = max
-        if (job) {
-          // Set a flag in Redis to prevent further retries
-          const nonRetriableKey = `non-retriable:${job.id}`;
-          fastify.redis.set(nonRetriableKey, '1', 'EX', 86400);
+        // Set a flag in Redis to prevent further retries (regardless of job state)
+        const nonRetriableKey = `non-retriable:${job.id}`;
+        await fastify.redis.set(nonRetriableKey, '1', 'EX', 86400);
+        
+        // If this was a rate limit, save the information
+        if (failureType === 'rate-limited') {
+          // Save rate limit information - this could be used to implement a backoff strategy
+          // for the specific user or globally
+          const rateLimitKey = `rate-limit:${job.data.username}`;
+          await fastify.redis.set(rateLimitKey, Date.now().toString(), 'EX', 3600);
           
-          // If this was a rate limit, save the information
-          if (failureType === 'rate-limited') {
-            // Save rate limit information - this could be used to implement a backoff strategy
-            // for the specific user or globally
-            const rateLimitKey = `rate-limit:${job.data.username}`;
-            fastify.redis.set(rateLimitKey, Date.now().toString(), 'EX', 3600);
+          // Increment global rate limit counter for monitoring
+          await fastify.redis.incr('rate-limit-count').catch(() => {});
+        }
+        
+        try {
+          // Check current job state before attempting to modify it
+          const jobState = await job.getState();
+          
+          if (jobState === 'active' || jobState === 'waiting' || jobState === 'delayed') {
+            // Only try to moveToFailed if the job is in a state where it makes sense
+            fastify.log.info(`Moving job ${job.id} to failed state with max attempts`);
             
-            // Increment global rate limit counter for monitoring
-            fastify.redis.incr('rate-limit-count').catch(() => {});
+            await job.moveToFailed(
+              { message: err.message },
+              job.opts.attempts || 3, // Use max attempts to prevent further retries
+              true // Pass true to remove the job from active
+            );
+          } else {
+            fastify.log.info(`Job ${job.id} is already in ${jobState} state, not moving to failed`);
+            
+            // If the job is stuck somehow, try updating it
+            if (jobState === 'stuck') {
+              try {
+                // Try to update job data to mark it as non-retriable
+                await job.updateData({
+                  ...job.data,
+                  _noRetry: true
+                });
+              } catch (updateErr) {
+                fastify.log.warn(`Couldn't update stuck job data: ${updateErr.message}`);
+              }
+            }
           }
+        } catch (moveErr) {
+          // Handle the error without crashing
+          fastify.log.warn(`Error moving job ${job.id} to failed state: ${moveErr.message}`);
           
-          // Use moveToFailed to immediately mark the job as permanently failed
-          job.moveToFailed(
-            { message: err.message },
-            job.opts.attempts, // Use max attempts to prevent further retries
-            true // Pass true to remove the job from active
-          );
+          // If moveToFailed fails, try to clean up the job another way
+          try {
+            // Try to discard the job if possible
+            await job.discard();
+            fastify.log.info(`Successfully discarded job ${job.id}`);
+          } catch (discardErr) {
+            fastify.log.warn(`Couldn't discard job ${job.id}: ${discardErr.message}`);
+            
+            // As a last resort, try to remove the job entirely
+            try {
+              await job.remove();
+              fastify.log.info(`Removed job ${job.id} as a last resort`);
+            } catch (removeErr) {
+              fastify.log.warn(`Couldn't remove job ${job.id}: ${removeErr.message}`);
+            }
+          }
         }
       }
     } catch (e) {

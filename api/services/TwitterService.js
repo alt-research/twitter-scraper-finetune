@@ -18,6 +18,35 @@ class TwitterService {
    * @returns {Object} - Job information
    */
   async queueScrapeJob(username, options = {}) {
+    // Check if the user is currently rate limited
+    const rateLimitKey = `rate-limit:${username}`;
+    const rateLimitTimestamp = await this.redis.get(rateLimitKey);
+    
+    if (rateLimitTimestamp) {
+      const rateLimitTime = parseInt(rateLimitTimestamp);
+      const now = Date.now();
+      
+      // Assume rate limits last 15 minutes
+      const rateLimitDuration = 15 * 60 * 1000; // 15 minutes in milliseconds
+      
+      if (!isNaN(rateLimitTime) && now - rateLimitTime < rateLimitDuration) {
+        // User is still rate limited
+        const remainingSeconds = Math.ceil((rateLimitTime + rateLimitDuration - now) / 1000);
+        const estimatedEndTime = new Date(rateLimitTime + rateLimitDuration).toISOString();
+        
+        return {
+          message: `Cannot start job for @${username} due to rate limiting`,
+          status: 'rate_limited',
+          details: {
+            username,
+            rateLimitedSince: new Date(rateLimitTime).toISOString(),
+            rateLimitedUntil: estimatedEndTime,
+            remainingSeconds
+          }
+        };
+      }
+    }
+    
     // Check if job for this username is already running
     const activeJobs = await this.queues.twitterScraper.getActive();
     const existingJob = activeJobs.find(job => 
@@ -36,7 +65,7 @@ class TwitterService {
     // Store or update the user in database
     await this.ensureUserExists(username);
 
-    // Add job to queue
+    // Add job to queue with modified options
     const job = await this.queues.twitterScraper.add(
       'scrape-twitter-user',
       { 
@@ -48,7 +77,12 @@ class TwitterService {
       { 
         jobId: `twitter-${username}-${Date.now()}`,
         attempts: 3,
-        removeOnComplete: true
+        removeOnComplete: true,
+        removeOnFail: false, // Keep failed jobs for debugging
+        backoff: {
+          type: 'exponential',
+          delay: 5000
+        }
       }
     );
     
