@@ -817,12 +817,23 @@ class TwitterPipeline {
     try {
       await this.validateEnvironment();
 
-      // Initialize main scraper
+      // Initialize main scraper - fail fast if authentication fails
       const scraperInitialized = await this.initializeScraper();
-      if (!scraperInitialized && !this.config.fallback.enabled) {
-        throw new Error(
-          "Failed to initialize scraper and fallback is disabled"
-        );
+      if (!scraperInitialized) {
+        const errorMsg = "Twitter authentication failed after maximum retries.";
+        Logger.error(errorMsg);
+        
+        // Authentication failed, so we don't need to continue
+        // We'll return an empty result that indicates auth failure
+        await this.partialCleanup();
+        return { 
+          tweets: [], 
+          user: null,
+          error: {
+            type: 'authentication',
+            message: errorMsg
+          }
+        };
       }
 
       // Start collection

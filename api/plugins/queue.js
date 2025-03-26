@@ -9,6 +9,24 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
+ * Custom job failure manager to handle different types of failures
+ * 
+ * @param {String} message - Error message
+ * @param {Object} options - Options
+ * @returns {Object} - Error object with metadata
+ */
+function createJobFailure(message, options = {}) {
+  return {
+    isJobFailure: true,
+    message,
+    type: options.type || 'general',
+    shouldRetry: options.shouldRetry !== undefined ? options.shouldRetry : true,
+    timestamp: new Date().toISOString(),
+    details: options.details || null
+  };
+}
+
+/**
  * BullMQ queue plugin for Fastify
  * 
  * @param {FastifyInstance} fastify - Fastify instance
@@ -73,8 +91,43 @@ async function queuePlugin(fastify, options) {
           });
         }
         
+        // First check if we can authenticate with Twitter
+        fastify.log.info(`Verifying Twitter authentication for job ${job.id}`);
+        await pipeline.validateEnvironment();
+        const authSuccess = await pipeline.initializeScraper();
+        
+        if (!authSuccess) {
+          // Authentication failed after maximum retries - fail the job immediately
+          const errorMsg = `Authentication failed for Twitter credentials. Job marked as failed.`;
+          fastify.log.error(errorMsg);
+          
+          // Mark this as an authentication failure that should not be retried
+          throw new Error(JSON.stringify(createJobFailure(errorMsg, {
+            type: 'authentication',
+            shouldRetry: false,
+            details: {
+              username: job.data.username,
+              credentialsProvided: !!job.data.options?.credentials
+            }
+          })));
+        }
+        
+        fastify.log.info(`Authentication successful, proceeding with job ${job.id}`);
+        
         // Run the pipeline to get tweets
-        const { tweets, user: scrapedUserData } = await pipeline.run();
+        const { tweets, user: scrapedUserData, error } = await pipeline.run();
+        
+        // Check if pipeline reported an error but didn't throw (like auth failure)
+        if (error && error.type === 'authentication') {
+          throw new Error(JSON.stringify(createJobFailure(error.message, {
+            type: 'authentication',
+            shouldRetry: false,
+            details: {
+              username: job.data.username,
+              credentialsProvided: !!job.data.options?.credentials
+            }
+          })));
+        }
         
         // Store in database if flag is set
         let dbResult = null;
@@ -131,6 +184,22 @@ async function queuePlugin(fastify, options) {
 
   twitterScraperWorker.on('failed', (job, err) => {
     fastify.log.error(`Twitter scraper job ${job?.id} failed: ${err.message}`);
+    
+    try {
+      // Check if this is a structured failure using our custom format
+      const errorData = JSON.parse(err.message);
+      if (errorData && errorData.isJobFailure) {
+        // If this is an authentication failure or other non-retriable error
+        if (!errorData.shouldRetry) {
+          fastify.log.warn(`Job ${job?.id} will not be retried: ${errorData.type} failure`);
+          
+          // Disable further retries for this job
+          job.discard();
+        }
+      }
+    } catch (e) {
+      // Not a JSON error, proceed with normal retry behavior
+    }
   });
 
   tweetProcessorWorker.on('completed', (job) => {
