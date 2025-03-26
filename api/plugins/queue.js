@@ -69,6 +69,23 @@ async function queuePlugin(fastify, options) {
       const { default: TwitterPipeline } = await import('../../src/twitter/TwitterPipeline.js');
       
       try {
+        // Check if this job was previously marked as non-retriable
+        const nonRetriableKey = `non-retriable:${job.id}`;
+        const isNonRetriable = await fastify.redis.get(nonRetriableKey);
+        
+        if (isNonRetriable) {
+          fastify.log.warn(`Job ${job.id} was previously marked as non-retriable, failing immediately`);
+          throw new Error(JSON.stringify(createJobFailure("Authentication failed for Twitter credentials", {
+            type: 'authentication',
+            shouldRetry: false,
+            details: {
+              username: job.data.username,
+              credentialsProvided: !!job.data.options?.credentials,
+              message: "Job marked as non-retriable - authentication failed"
+            }
+          })));
+        }
+        
         // Extract Twitter credentials from options if provided
         const credentials = {
           username: job.data.options?.credentials?.username,
@@ -101,6 +118,15 @@ async function queuePlugin(fastify, options) {
           const errorMsg = `Authentication failed for Twitter credentials. Job marked as failed.`;
           fastify.log.error(errorMsg);
           
+          // Mark this job as non-retriable in Redis with 24-hour expiry
+          await fastify.redis.set(nonRetriableKey, '1', 'EX', 86400); 
+          
+          // Also update job options to prevent further retries
+          await job.updateData({
+            ...job.data,
+            _noRetry: true
+          });
+          
           // Mark this as an authentication failure that should not be retried
           throw new Error(JSON.stringify(createJobFailure(errorMsg, {
             type: 'authentication',
@@ -119,6 +145,9 @@ async function queuePlugin(fastify, options) {
         
         // Check if pipeline reported an error but didn't throw (like auth failure)
         if (error && error.type === 'authentication') {
+          // Mark this job as non-retriable in Redis with 24-hour expiry
+          await fastify.redis.set(nonRetriableKey, '1', 'EX', 86400);
+          
           throw new Error(JSON.stringify(createJobFailure(error.message, {
             type: 'authentication',
             shouldRetry: false,
@@ -186,19 +215,45 @@ async function queuePlugin(fastify, options) {
     fastify.log.error(`Twitter scraper job ${job?.id} failed: ${err.message}`);
     
     try {
+      let shouldDiscard = false;
+      
+      // Check if the job is marked with _noRetry flag
+      if (job?.data?._noRetry) {
+        shouldDiscard = true;
+        fastify.log.warn(`Job ${job.id} has _noRetry flag set, will not be retried`);
+      }
+      
       // Check if this is a structured failure using our custom format
-      const errorData = JSON.parse(err.message);
-      if (errorData && errorData.isJobFailure) {
-        // If this is an authentication failure or other non-retriable error
-        if (!errorData.shouldRetry) {
-          fastify.log.warn(`Job ${job?.id} will not be retried: ${errorData.type} failure`);
+      try {
+        const errorData = JSON.parse(err.message);
+        if (errorData && errorData.isJobFailure) {
+          // If this is an authentication failure or other non-retriable error
+          if (!errorData.shouldRetry) {
+            shouldDiscard = true;
+            fastify.log.warn(`Job ${job?.id} will not be retried: ${errorData.type} failure`);
+          }
+        }
+      } catch (e) {
+        // Not a JSON error, proceed with normal retry behavior
+      }
+      
+      // If we should discard the job
+      if (shouldDiscard) {
+        // Force the job to fail completely by moving it to failed with attempts = max
+        if (job) {
+          // Set a flag in Redis to prevent further retries
+          fastify.redis.set(`non-retriable:${job.id}`, '1', 'EX', 86400);
           
-          // Disable further retries for this job
-          job.discard();
+          // Use moveToFailed to immediately mark the job as permanently failed
+          job.moveToFailed(
+            { message: err.message },
+            job.opts.attempts, // Use max attempts to prevent further retries
+            true // Pass true to remove the job from active
+          );
         }
       }
     } catch (e) {
-      // Not a JSON error, proceed with normal retry behavior
+      fastify.log.error(`Error handling job failure: ${e.message}`);
     }
   });
 

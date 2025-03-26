@@ -36,7 +36,7 @@ class TwitterService {
     // Store or update the user in database
     await this.ensureUserExists(username);
 
-    // Add job to queue
+    // Add job to queue with modified options
     const job = await this.queues.twitterScraper.add(
       'scrape-twitter-user',
       { 
@@ -48,7 +48,12 @@ class TwitterService {
       { 
         jobId: `twitter-${username}-${Date.now()}`,
         attempts: 3,
-        removeOnComplete: true
+        removeOnComplete: true,
+        removeOnFail: false, // Keep failed jobs for debugging
+        backoff: {
+          type: 'exponential',
+          delay: 5000
+        }
       }
     );
     
