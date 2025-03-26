@@ -208,16 +208,81 @@ class TwitterService {
       return null;
     }
     
+    const state = await job.getState();
+    const result = job.returnvalue;
+    
+    // Check if the job failed due to authentication issues or rate limiting
+    let failureReason = null;
+    let failureType = null;
+    let failureDetails = null;
+    
+    if (state === 'failed' && job.failedReason) {
+      failureReason = job.failedReason;
+      
+      // Try to parse structured error information
+      try {
+        const errorData = JSON.parse(job.failedReason);
+        if (errorData && errorData.isJobFailure) {
+          failureReason = errorData.message;
+          failureType = errorData.type;
+          failureDetails = errorData.details;
+          
+          // Provide friendly error messages for common failures
+          if (errorData.type === 'authentication') {
+            failureReason = 'Twitter authentication failed. Please check your Twitter credentials.';
+          } else if (errorData.type === 'rate-limited') {
+            failureReason = 'Twitter API rate limit reached. The job has been stopped to prevent account restrictions.';
+          }
+        }
+      } catch (e) {
+        // Not a structured error, use basic detection instead
+        if (job.failedReason.includes('Authentication failed') || 
+            job.failedReason.includes('login') || 
+            job.failedReason.includes('credentials')) {
+          failureReason = 'Twitter authentication failed. Please check your Twitter credentials.';
+          failureType = 'authentication';
+        } else if (job.failedReason.includes('rate limit') || 
+                  job.failedReason.includes('too many requests')) {
+          failureReason = 'Twitter API rate limit reached. The job has been stopped to prevent account restrictions.';
+          failureType = 'rate-limited';
+        }
+      }
+    }
+    
+    // Check if the account is currently rate limited
+    let isRateLimited = false;
+    let rateLimitedUntil = null;
+    
+    if (job.data.username) {
+      const rateLimitKey = `rate-limit:${job.data.username}`;
+      const rateLimitTimestamp = await this.redis.get(rateLimitKey);
+      
+      if (rateLimitTimestamp) {
+        isRateLimited = true;
+        // Assume rate limits typically last 15 minutes
+        const rateLimitTime = parseInt(rateLimitTimestamp);
+        if (!isNaN(rateLimitTime)) {
+          const estimatedEndTime = new Date(rateLimitTime + (15 * 60 * 1000));
+          rateLimitedUntil = estimatedEndTime.toISOString();
+        }
+      }
+    }
+    
     return {
       id: job.id,
       data: job.data,
-      state: await job.getState(),
+      state: state,
       createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : null,
       processedOn: job.processedOn ? new Date(job.processedOn).toISOString() : null,
       finishedOn: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
       progress: job.progress,
       attemptsMade: job.attemptsMade,
-      result: job.returnvalue
+      result: result,
+      failureReason: failureReason,
+      failureType: failureType,
+      failureDetails: failureDetails,
+      isRateLimited: isRateLimited,
+      rateLimitedUntil: rateLimitedUntil
     };
   }
 
