@@ -58,9 +58,10 @@ class TwitterPipeline {
         rateLimitDuration: parseInt(process.env.RATE_LIMIT_DURATION) || 15 * 60 * 1000,
       },
       timeouts: {
-        globalTimeout: parseInt(process.env.COLLECTION_GLOBAL_TIMEOUT) || 60 * 1000,
-        stallTimeout: parseInt(process.env.COLLECTION_STALL_TIMEOUT) || 15000,
-        progressCheckInterval: parseInt(process.env.COLLECTION_PROGRESS_CHECK) || 2000,
+        globalTimeout: parseInt(options.timeouts?.globalTimeout || process.env.COLLECTION_GLOBAL_TIMEOUT) || 120000,
+        stallTimeout: parseInt(options.timeouts?.stallTimeout || process.env.COLLECTION_STALL_TIMEOUT) || 15000,
+        progressCheckInterval: parseInt(options.timeouts?.progressCheckInterval || process.env.COLLECTION_PROGRESS_CHECK) || 2000,
+        forcedBreakTimeout: parseInt(process.env.FORCED_BREAK_TIMEOUT) || 120000,
       },
       fallback: {
         enabled: options.fallbackEnabled !== undefined ? options.fallbackEnabled : true,
@@ -96,6 +97,10 @@ class TwitterPipeline {
 
     // New behavior state tracking
     this.behaviorState = null;
+
+    // New flag for stall detection
+    this.forceTerminated = false;
+    this.terminationError = null;
   }
 
   async initializeFallback() {
@@ -553,6 +558,10 @@ class TwitterPipeline {
 
   async collectTweets(scraper) {
     try {
+      // Reset force termination flags at the start of each collection
+      this.forceTerminated = false;
+      this.terminationError = null;
+      
       const profile = await scraper.getProfile(this.username);
       const totalExpectedTweets = profile.tweetsCount;
 
@@ -597,14 +606,52 @@ class TwitterPipeline {
           // Update rate limit hit counter
           this.stats.rateLimitHits++;
           
-          // Break out of collection loop early by forcing the interval to check very frequently
+          // Set a start time for the stall to enforce a maximum wait time
+          const stallStartTime = Date.now();
+          // Maximum time to wait for breaking out of loop - 2 minutes
+          const MAX_WAIT_FOR_BREAK = this.config.timeouts.forcedBreakTimeout; // 2 minutes
+          
+          // Clear the main interval to avoid overlapping checks
           clearInterval(stallDetectionInterval);
+          
+          // Break out of collection loop early by forcing the interval to check very frequently
           stallDetectionInterval = setInterval(() => {
-            // This smaller interval just keeps checking if we've broken out of the loop
+            // Calculate how long we've been waiting to break out
+            const waitTime = Date.now() - stallStartTime;
+            
+            // This smaller interval checks if we've broken out of the loop
             if (isStalled) {
-              Logger.debug("Still waiting to break out of collection loop...");
+              if (waitTime > MAX_WAIT_FOR_BREAK) {
+                // We've waited too long, force terminate the collection
+                Logger.error(`Forcing collection termination after ${Math.round(waitTime/1000)}s of waiting to break out of loop`);
+                
+                // Clear this interval
+                clearInterval(stallDetectionInterval);
+                stallDetectionInterval = null;
+                
+                // Instead of throwing an error which can crash the server,
+                // set a flag that will be checked by the collection process
+                this.forceTerminated = true;
+                
+                // Set error information that can be returned to caller
+                this.terminationError = {
+                  type: 'rate-limited',
+                  message: "Rate limit detected - forced termination after excessive wait time",
+                  details: {
+                    waitTime: Math.round(waitTime/1000),
+                    maxWaitTime: Math.round(MAX_WAIT_FOR_BREAK/1000)
+                  }
+                };
+              } else if (waitTime > 30000 && waitTime % 30000 < 1000) {
+                // Log every 30 seconds to show we're still working
+                Logger.warn(`Still waiting to break out of collection loop... (${Math.round(waitTime/1000)}s / ${MAX_WAIT_FOR_BREAK/1000}s max wait)`);
+              } else {
+                // More frequent but less verbose logging
+                Logger.debug(`Waiting to break: ${Math.round(waitTime/1000)}s elapsed`);
+              }
             } else {
               // If somehow not stalled anymore, clear this interval
+              Logger.info("Successfully broke out of collection loop");
               clearInterval(stallDetectionInterval);
               stallDetectionInterval = null;
             }
@@ -621,9 +668,9 @@ class TwitterPipeline {
         );
 
         for await (const tweet of searchResults) {
-          // Check if we've been stalled - break out of the loop safely
-          if (isStalled) {
-            Logger.warn("Breaking out of collection loop due to detected stall");
+          // Check if we've been stalled or force terminated - break out of the loop safely
+          if (isStalled || this.forceTerminated) {
+            Logger.warn("Breaking out of collection loop due to detected stall or force termination");
             break;
           }
           
@@ -675,8 +722,12 @@ class TwitterPipeline {
         isStalled = true;
         this.stats.rateLimitHits++;
         
-        // Check for rate limit related errors
-        if (error.message.includes("rate limit") || error.message.includes("too many requests")) {
+        // Check for rate limit related errors or forced termination
+        const isRateLimitError = error.message.includes("rate limit") || 
+                                error.message.includes("too many requests") ||
+                                error.message.includes("forced termination");
+        
+        if (isRateLimitError) {
           Logger.warn(`Rate limit error from scraper: ${error.message}`);
           await this.handleRateLimit(this.stats.rateLimitHits + 1);
 
@@ -761,6 +812,15 @@ class TwitterPipeline {
         }
       }
 
+      // Check if we were force terminated
+      if (this.forceTerminated) {
+        Logger.warn(`Collection was force terminated. Returning ${allTweets.size} tweets that were collected.`);
+        return {
+          tweets: Array.from(allTweets.values()),
+          error: this.terminationError
+        };
+      }
+      
       // Even if we were stalled, return what we managed to collect
       if (isStalled) {
         Logger.warn(`Collection was stalled. Returning ${allTweets.size} tweets that were collected.`);
@@ -774,11 +834,20 @@ class TwitterPipeline {
         );
       }
 
-      return Array.from(allTweets.values());
+      return {
+        tweets: Array.from(allTweets.values()),
+        error: isStalled ? { type: 'rate-limited', message: 'Collection stalled due to rate limiting' } : null
+      };
     } catch (error) {
       Logger.error(`Failed to collect tweets: ${error.message}`);
-      // Return empty array rather than throwing to prevent server crash
-      return [];
+      // Return empty array with error details
+      return {
+        tweets: [],
+        error: {
+          type: 'error',
+          message: error.message
+        }
+      };
     }
   }
 
@@ -971,6 +1040,7 @@ class TwitterPipeline {
       const GLOBAL_TIMEOUT = this.config.timeouts.globalTimeout;
       let globalTimeoutId = null;
       let isTimedOut = false;
+      let forceTerminate = false;
       
       // Create a wrapper that handles global timeout
       const runWithTimeout = async () => {
@@ -979,21 +1049,31 @@ class TwitterPipeline {
           // Start the global timeout
           globalTimeoutId = setTimeout(() => {
             isTimedOut = true;
+            forceTerminate = true;
             Logger.warn(`⚠️ Global collection timeout reached after ${GLOBAL_TIMEOUT/1000}s`);
+            
+            // Attempt to trigger a cleaner stop of the collection
+            try {
+              // Try to interrupt any ongoing operations
+              this.scraper.interrupt?.();
+            } catch (interruptError) {
+              Logger.debug(`Error during timeout interrupt: ${interruptError.message}`);
+            }
+            
             // Resolve with empty array instead of rejecting
             resolve([]);
           }, GLOBAL_TIMEOUT);
           
           // Run the actual collection
           Logger.startSpinner(`Collecting tweets from @${this.username}`);
-          this.collectTweets(this.scraper).then(tweets => {
+          this.collectTweets(this.scraper).then(result => {
             Logger.stopSpinner();
             // Clear timeout
             if (globalTimeoutId) {
               clearTimeout(globalTimeoutId);
               globalTimeoutId = null;
             }
-            resolve(tweets);
+            resolve(result);
           }).catch(error => {
             Logger.stopSpinner(false);
             Logger.error(`Collection error: ${error.message}`);
@@ -1002,21 +1082,38 @@ class TwitterPipeline {
               clearTimeout(globalTimeoutId);
               globalTimeoutId = null;
             }
-            // Resolve with empty array to prevent crashes
-            resolve([]);
+            // Resolve with empty result with error info to prevent crashes
+            resolve({ tweets: [], error: { type: 'error', message: error.message } });
           });
         });
       };
       
       // Run collection with timeout
-      const allTweets = await runWithTimeout();
+      const result = await runWithTimeout();
+      const allTweets = result.tweets || [];
+      const collectionError = result.error || null;
       
       // Check if we got any tweets
       if (allTweets.length === 0) {
+        let errorType = 'rate-limited';
+        let errorMessage = '';
+        
         if (isTimedOut) {
-          Logger.warn("⚠️ Collection timed out with no tweets collected");
+          errorMessage = `Tweet collection timed out after ${GLOBAL_TIMEOUT/1000} seconds`;
+          errorType = 'timeout';
+          Logger.warn(`⚠️ ${errorMessage}`);
+        } else if (forceTerminate) {
+          errorMessage = "Collection forcibly terminated due to excessive stall";
+          errorType = 'timeout';
+          Logger.warn(`⚠️ ${errorMessage}`);
+        } else if (collectionError) {
+          // Use the error information from collection if available
+          errorType = collectionError.type || 'error';
+          errorMessage = collectionError.message || "Collection failed with an unknown error";
+          Logger.warn(`⚠️ ${errorMessage}`);
         } else {
-          Logger.warn("⚠️ No tweets collected - possible rate limiting");
+          errorMessage = "No tweets collected due to possible rate limiting";
+          Logger.warn(`⚠️ ${errorMessage}`);
         }
         
         // Return with an error indicating rate limiting or timeout
@@ -1025,10 +1122,8 @@ class TwitterPipeline {
           tweets: [], 
           user: null,
           error: {
-            type: 'rate-limited',
-            message: isTimedOut ? 
-              "Tweet collection timed out after " + (GLOBAL_TIMEOUT/1000) + " seconds" : 
-              "No tweets collected due to possible rate limiting"
+            type: errorType,
+            message: errorMessage
           }
         };
       }
@@ -1238,6 +1333,20 @@ class TwitterPipeline {
     } catch (error) {
       Logger.warn(`⚠️  Cleanup error: ${error.message}`);
     }
+  }
+
+  // Add a method that can be called to interrupt any ongoing operation
+  interrupt() {
+    Logger.warn('Pipeline interrupt requested');
+    this.forceTerminated = true;
+    this.terminationError = {
+      type: 'interrupted',
+      message: 'Operation was interrupted externally',
+      details: {
+        username: this.username,
+        timestamp: Date.now()
+      }
+    };
   }
 }
 
