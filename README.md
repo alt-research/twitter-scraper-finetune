@@ -477,3 +477,41 @@ For production deployments, this project includes a Docker setup that's ready to
    
    Edit `docker-compose.yml` to uncomment the command line for the twitter-api service:
    ```
+
+# Twitter Scraper
+
+## Environment Variables
+
+The Twitter scraper can be configured using the following environment variables:
+
+### Twitter Credentials
+- `TWITTER_USERNAME`: Your Twitter username
+- `TWITTER_PASSWORD`: Your Twitter password
+- `TWITTER_EMAIL`: Your Twitter email address
+
+### Twitter Scraper Settings
+- `MAX_TWEETS`: Maximum number of tweets to collect per user (default: 50000)
+- `MAX_RETRIES`: Maximum number of retries for failed requests (default: 5)
+- `RETRY_DELAY`: Base delay between retries in milliseconds (default: 5000)
+- `MIN_DELAY`: Minimum delay between requests in milliseconds (default: 1000)
+- `MAX_DELAY`: Maximum delay between requests in milliseconds (default: 3000)
+- `RATE_LIMIT_THRESHOLD`: Number of rate limits before switching to fallback collection (default: 3)
+
+### Timeout Settings
+- `COLLECTION_GLOBAL_TIMEOUT`: Global timeout for the entire collection process in milliseconds (default: 60000)
+- `COLLECTION_STALL_TIMEOUT`: Time without progress before marking collection as stalled in milliseconds (default: 15000)
+- `COLLECTION_PROGRESS_CHECK`: How often to check collection progress in milliseconds (default: 2000)
+- `JOB_STALL_TIMEOUT`: Time without progress in a job before marking as stalled in milliseconds (default: 45000)
+- `JOB_PROGRESS_CHECK`: How often to check job progress in milliseconds (default: 5000)
+
+### Rate Limit Settings
+- `RATE_LIMIT_BASE_DELAY`: Base delay for rate limit backoff in milliseconds (default: 60000)
+- `RATE_LIMIT_MAX_DELAY`: Maximum delay for rate limit backoff in milliseconds (default: 900000)
+- `RATE_LIMIT_DURATION`: How long to mark a user as rate limited in milliseconds (default: 900000)
+- `RATE_LIMIT_KEY_EXPIRY`: Redis key expiry for rate limit flags in seconds (default: 900)
+
+### Redis Key Settings
+- `NON_RETRIABLE_KEY_EXPIRY`: Redis key expiry for non-retriable flags in seconds (default: 86400)
+- `PROGRESS_KEY_EXPIRY`: Redis key expiry for progress tracking in seconds (default: 3600)
+
+Copy the `.env.example` file to `.env` and customize the settings as needed for your environment. 

@@ -2,40 +2,60 @@ version: '3.8'
 
 services:
   twitter-api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: twitter-scraper-api
     ports:
       - "3000:3000"
-    environment:
-      - PORT=3000
-      - HOST=0.0.0.0
-      - NODE_ENV=production
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USERNAME=postgres
-      - DB_PASSWORD=postgres
-      - DB_DATABASE=twitter_scraper
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=
-      - TWITTER_USERNAME=${TWITTER_USERNAME}
-      - TWITTER_PASSWORD=${TWITTER_PASSWORD}
-      - TWITTER_EMAIL=${TWITTER_EMAIL}
-      - MAX_TWEETS=50000
-      - MAX_RETRIES=5
-      - DEBUG=false
-      - POSTGRES_SSL=false
     volumes:
-      - ./data:/usr/src/app/data
-      - ./cookies:/usr/src/app/cookies
-      - ./backups:/usr/src/app/backups
-      - ./logs:/usr/src/app/logs
-      - ./db_logs:/usr/src/app/db_logs
-    depends_on:
-      - redis
-      - postgres
+      - ./cookies:/app/cookies
+      - ./data:/app/data
+    environment:
+      # Database connection
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: twitter_scraper
+      
+      # Redis connection
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      
+      # Twitter Credentials (set these in a .env file or pass directly)
+      # TWITTER_USERNAME: ${TWITTER_USERNAME}
+      # TWITTER_PASSWORD: ${TWITTER_PASSWORD}
+      # TWITTER_EMAIL: ${TWITTER_EMAIL}
+      
+      # Twitter Scraper Settings (adjust as needed)
+      MAX_TWEETS: 50000
+      MAX_RETRIES: 5
+      RETRY_DELAY: 5000
+      MIN_DELAY: 1000
+      MAX_DELAY: 3000
+      RATE_LIMIT_THRESHOLD: 3
+      
+      # Timeout Settings (adjust as needed)
+      COLLECTION_GLOBAL_TIMEOUT: 60000     # 60 seconds
+      COLLECTION_STALL_TIMEOUT: 15000      # 15 seconds
+      COLLECTION_PROGRESS_CHECK: 2000      # 2 seconds
+      JOB_STALL_TIMEOUT: 45000             # 45 seconds
+      JOB_PROGRESS_CHECK: 5000             # 5 seconds
+      
+      # Rate Limit Settings (adjust as needed)
+      RATE_LIMIT_BASE_DELAY: 60000         # 1 minute
+      RATE_LIMIT_MAX_DELAY: 900000         # 15 minutes
+      RATE_LIMIT_DURATION: 900000          # 15 minutes
+      RATE_LIMIT_KEY_EXPIRY: 900           # 15 minutes
+      
+      # Redis Key Settings (adjust as needed)
+      NON_RETRIABLE_KEY_EXPIRY: 86400      # 24 hours
+      PROGRESS_KEY_EXPIRY: 3600            # 1 hour
+      
+      # Node.js settings
+      NODE_ENV: production
     restart: unless-stopped
-    # Use the entrypoint script with migrations
-    command: ["/usr/src/app/entrypoint-with-migrations.sh"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/twitter/health"]
       interval: 30s
@@ -44,11 +64,12 @@ services:
       start_period: 10s
 
   redis:
-    image: redis:alpine
+    image: redis:7
+    container_name: twitter-scraper-redis
     ports:
       - "6379:6379"
     volumes:
-      - redis-data:/data
+      - redis_data:/data
     restart: unless-stopped
     command: redis-server --appendonly yes
     healthcheck:
@@ -58,15 +79,16 @@ services:
       retries: 3
 
   postgres:
-    image: postgres:14-alpine
+    image: postgres:14
+    container_name: twitter-scraper-postgres
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=twitter_scraper
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: twitter_scraper
     ports:
       - "5432:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -75,5 +97,5 @@ services:
       retries: 3
 
 volumes:
-  redis-data:
-  postgres-data: 
+  redis_data:
+  postgres_data: 

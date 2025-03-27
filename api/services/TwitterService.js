@@ -26,8 +26,8 @@ class TwitterService {
       const rateLimitTime = parseInt(rateLimitTimestamp);
       const now = Date.now();
       
-      // Assume rate limits last 15 minutes
-      const rateLimitDuration = 15 * 60 * 1000; // 15 minutes in milliseconds
+      // Get rate limit duration from environment variable or use default (15 minutes)
+      const rateLimitDuration = parseInt(process.env.RATE_LIMIT_DURATION) || 15 * 60 * 1000; // milliseconds
       
       if (!isNaN(rateLimitTime) && now - rateLimitTime < rateLimitDuration) {
         // User is still rate limited

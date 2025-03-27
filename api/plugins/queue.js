@@ -35,6 +35,11 @@ function createJobFailure(message, options = {}) {
  * @returns {Object} - Timer and cleanup function
  */
 function setupCollectionTimeout(job, fastify, timeoutMs = 30000) {
+  // Use environment variable if available
+  const jobStallTimeout = parseInt(process.env.JOB_STALL_TIMEOUT) || timeoutMs;
+  const progressKeyExpiry = parseInt(process.env.PROGRESS_KEY_EXPIRY) || 3600; // Default 1 hour expiry
+  const progressCheckInterval = parseInt(process.env.JOB_PROGRESS_CHECK) || 5000; // Default 5 seconds
+
   // Create a key for this job's progress tracking
   const progressKey = `progress:${job.id}`;
   let lastTweetCount = 0;
@@ -46,7 +51,7 @@ function setupCollectionTimeout(job, fastify, timeoutMs = 30000) {
     tweetCount: 0,
     lastUpdate: Date.now(),
     status: 'collecting'
-  }), 'EX', 3600); // 1 hour expiry
+  }), 'EX', progressKeyExpiry);
   
   // Setup the interval to check progress
   const timer = setInterval(async () => {
@@ -70,15 +75,15 @@ function setupCollectionTimeout(job, fastify, timeoutMs = 30000) {
         stuckTime += currentTime - Math.max(progress.lastUpdate, startTime);
         
         // If stuck for too long, mark job as rate limited
-        if (stuckTime >= timeoutMs) {
-          fastify.log.warn(`Job ${job.id} appears to be stuck for ${timeoutMs/1000}s. Likely rate limited.`);
+        if (stuckTime >= jobStallTimeout) {
+          fastify.log.warn(`Job ${job.id} appears to be stuck for ${jobStallTimeout/1000}s. Likely rate limited.`);
           
           // Update progress status to rate-limited
           await fastify.redis.set(progressKey, JSON.stringify({
             ...progress,
             lastUpdate: currentTime,
             status: 'rate-limited'
-          }), 'EX', 3600);
+          }), 'EX', progressKeyExpiry);
           
           // Clear the interval
           clearInterval(timer);
@@ -92,12 +97,12 @@ function setupCollectionTimeout(job, fastify, timeoutMs = 30000) {
         await fastify.redis.set(progressKey, JSON.stringify({
           ...progress,
           lastUpdate: currentTime
-        }), 'EX', 3600);
+        }), 'EX', progressKeyExpiry);
       }
     } catch (error) {
       fastify.log.error(`Error checking job progress: ${error.message}`);
     }
-  }, 5000); // Check every 5 seconds
+  }, progressCheckInterval);
   
   // Return both the timer and an update function
   return {
@@ -112,7 +117,7 @@ function setupCollectionTimeout(job, fastify, timeoutMs = 30000) {
           ...progress,
           tweetCount,
           lastUpdate: Date.now()
-        }), 'EX', 3600);
+        }), 'EX', progressKeyExpiry);
       } catch (error) {
         fastify.log.error(`Error updating job progress: ${error.message}`);
       }
@@ -163,112 +168,97 @@ async function queuePlugin(fastify, options) {
     async (job) => {
       fastify.log.info(`Processing job ${job.id} to scrape tweets for @${job.data.username}`);
       
-      // Import TwitterPipeline dynamically
-      const { default: TwitterPipeline } = await import('../../src/twitter/TwitterPipeline.js');
-      
-      // Check immediately if this job should be processed at all
-      const nonRetriableKey = `non-retriable:${job.id}`;
-      const isNonRetriable = await fastify.redis.get(nonRetriableKey);
-      
-      if (isNonRetriable) {
-        // Job was previously marked as non-retriable
-        // Instead of throwing an error, let's finalize this job without running it
-        fastify.log.warn(`Job ${job.id} was previously marked as non-retriable and will not run`);
-        
-        // Intentionally skip this job by returning a completed status that shows it was skipped
-        return {
-          status: 'skipped',
-          reason: 'Previously marked as non-retriable',
-          username: job.data.username
-        };
-      }
-      
-      // Setup collection timeout detection (30 seconds of no progress = rate limited)
-      const timeout = setupCollectionTimeout(job, fastify, 30000);
-      
       try {
-        // Check if the job has previously been marked as rate-limited
-        const progressKey = `progress:${job.id}`;
-        const progressData = await fastify.redis.get(progressKey);
-        if (progressData) {
-          const progress = JSON.parse(progressData);
-          if (progress.status === 'rate-limited') {
-            timeout.clearTimeout();
-            fastify.log.warn(`Job ${job.id} was previously rate-limited, failing to prevent further retries`);
-            throw new Error(JSON.stringify(createJobFailure("Twitter API rate limit detected. Collection was stuck.", {
-              type: 'rate-limited',
-              shouldRetry: false,
-              details: {
-                username: job.data.username,
-                stuckAt: progress.lastUpdate
-              }
-            })));
-          }
+        // Check if this job was previously marked as non-retriable
+        const nonRetriableKey = `non-retriable:${job.id}`;
+        const isNonRetriable = await fastify.redis.get(nonRetriableKey);
+        
+        if (isNonRetriable) {
+          fastify.log.warn(`Job ${job.id} was previously marked as non-retriable, skipping execution`);
+          return {
+            status: 'skipped',
+            message: 'Job was previously marked as non-retriable'
+          };
         }
         
-        // Extract Twitter credentials from options if provided
-        const credentials = {
-          username: job.data.options?.credentials?.username,
-          password: job.data.options?.credentials?.password,
-          email: job.data.options?.credentials?.email
-        };
+        // Create a timeout to detect stuck collections
+        const progressKey = `progress:${job.id}`;
+        const timeout = setupCollectionTimeout(job, fastify);
         
-        // Create pipeline instance with credentials and options merged
+        // Import the TwitterPipeline class
+        const TwitterPipeline = (await import('../../src/twitter/TwitterPipeline.js')).default;
+        
+        // Create pipeline instance with credentials if provided
         const pipeline = new TwitterPipeline(job.data.username, {
-          credentials,
-          ...job.data.options
+          ...(job.data.options || {}),
+          credentials: job.data.options?.credentials || null
         });
         
-        // Set any custom options from the job data
-        if (job.data.options) {
-          Object.keys(job.data.options).forEach(key => {
-            if (key in pipeline.config.twitter) {
-              pipeline.config.twitter[key] = job.data.options[key];
-            }
-          });
-        }
-        
-        // First check if we can authenticate with Twitter
-        fastify.log.info(`Verifying Twitter authentication for job ${job.id}`);
-        await pipeline.validateEnvironment();
-        const authSuccess = await pipeline.initializeScraper();
-        
-        if (!authSuccess) {
-          timeout.clearTimeout();
-          // Authentication failed after maximum retries - fail the job immediately
-          const errorMsg = `Authentication failed for Twitter credentials. Job marked as failed.`;
-          fastify.log.error(errorMsg);
-          
-          // Mark this job as non-retriable in Redis with 24-hour expiry
-          await fastify.redis.set(nonRetriableKey, '1', 'EX', 86400); 
-          
-          // Mark this as an authentication failure that should not be retried
-          throw new Error(JSON.stringify(createJobFailure(errorMsg, {
-            type: 'authentication',
-            shouldRetry: false,
-            details: {
-              username: job.data.username,
-              credentialsProvided: !!job.data.options?.credentials
-            }
-          })));
-        }
-        
-        fastify.log.info(`Authentication successful, proceeding with job ${job.id}`);
-        
         // Add a progress tracking hook to the pipeline
+        let collectionTimeout = null;
+        const MAX_COLLECTION_TIME = parseInt(process.env.COLLECTION_GLOBAL_TIMEOUT) || 60 * 1000; // Get from env var or default to 60 seconds
+        
+        // Set a timeout for the entire collection process - but don't throw errors
+        collectionTimeout = setTimeout(() => {
+          fastify.log.warn(`Collection timeout reached after ${MAX_COLLECTION_TIME/1000}s for job ${job.id}`);
+          
+          // Mark as rate limited in Redis
+          const progressKey = `progress:${job.id}`;
+          const progressKeyExpiry = parseInt(process.env.PROGRESS_KEY_EXPIRY) || 3600; // Default 1 hour expiry
+          fastify.redis.set(progressKey, JSON.stringify({
+            tweetCount: 0,
+            lastUpdate: Date.now(),
+            status: 'rate-limited',
+            error: 'Collection timeout reached'
+          }), 'EX', progressKeyExpiry);
+          
+          // Mark the user as rate limited
+          const rateLimitKey = `rate-limit:${job.data.username}`;
+          const rateLimitDuration = parseInt(process.env.RATE_LIMIT_KEY_EXPIRY) || 15 * 60; // Get from env var or default to 15 min
+          fastify.redis.set(rateLimitKey, Date.now().toString(), 'EX', rateLimitDuration);
+          
+          // Mark this job as non-retriable
+          const nonRetriableKey = `non-retriable:${job.id}`;
+          const nonRetriableExpiry = parseInt(process.env.NON_RETRIABLE_KEY_EXPIRY) || 86400; // Default 24 hours
+          fastify.redis.set(nonRetriableKey, '1', 'EX', nonRetriableExpiry);
+          
+          // Emit event to force terminate this job - WITHOUT throwing an error
+          fastify.queues.twitterScraper.emit('forceTerminate', job.id);
+          
+        }, MAX_COLLECTION_TIME);
+        
+        // Add a progress tracker to monitor tweet collection
         const originalCollectTweets = pipeline.collectTweets.bind(pipeline);
         pipeline.collectTweets = async function(scraper) {
           // Keep track of tweet collection progress
           let lastCount = 0;
+          let lastUpdateTime = Date.now();
+          const STALL_TIMEOUT = parseInt(process.env.JOB_STALL_TIMEOUT) || 45000; // Get from env var or default to 45 seconds
           
           // Create an interval to check progress
           const progressInterval = setInterval(() => {
-            if (this.stats.uniqueTweets > lastCount) {
-              // Update progress in our timeout tracker
-              timeout.updateProgress(this.stats.uniqueTweets);
-              lastCount = this.stats.uniqueTweets;
+            const currentCount = this.stats.uniqueTweets || 0;
+            
+            if (currentCount > lastCount) {
+              // Progress was made, update progress tracker
+              timeout.updateProgress(currentCount);
+              lastCount = currentCount;
+              lastUpdateTime = Date.now();
+            } else {
+              // Check for stall
+              const stallTime = Date.now() - lastUpdateTime;
+              if (stallTime > STALL_TIMEOUT) {
+                clearInterval(progressInterval);
+                fastify.log.warn(`Job ${job.id} stalled for ${Math.round(stallTime/1000)}s with ${currentCount} tweets`);
+                
+                // If we have some tweets, don't fail - just use what we've got
+                if (currentCount > 0) {
+                  fastify.log.info(`Proceeding with ${currentCount} tweets collected before stall`);
+                  return;
+                }
+              }
             }
-          }, 2000);
+          }, parseInt(process.env.JOB_PROGRESS_CHECK) || 5000);
           
           try {
             // Call the original collectTweets method
@@ -283,9 +273,11 @@ async function queuePlugin(fastify, options) {
             clearInterval(progressInterval);
             
             // Check if this was a rate limit error
-            if (error.message.includes('rate limit') || 
+            if (error.isRateLimit || 
+                error.message.includes('rate limit') || 
                 error.message.includes('exceeded') || 
-                error.message.includes('too many requests')) {
+                error.message.includes('too many requests') ||
+                error.message.includes('stalled')) {
               // Mark as rate limited
               await fastify.redis.set(progressKey, JSON.stringify({
                 tweetCount: lastCount,
@@ -293,6 +285,22 @@ async function queuePlugin(fastify, options) {
                 status: 'rate-limited',
                 error: error.message
               }), 'EX', 3600);
+              
+              // If we have some tweets, don't fail completely
+              if (lastCount > 0) {
+                fastify.log.warn(`Rate limited but collected ${lastCount} tweets - proceeding with partial results`);
+                return;
+              }
+              
+              // Convert the error to a job failure rather than throwing directly
+              throw new Error(JSON.stringify(createJobFailure("Rate limit detected during collection", {
+                type: 'rate-limited',
+                shouldRetry: false,
+                details: {
+                  username: job.data.username,
+                  error: error.message
+                }
+              })));
             }
             
             throw error;
@@ -300,80 +308,199 @@ async function queuePlugin(fastify, options) {
         };
         
         // Run the pipeline to get tweets
-        const { tweets, user: scrapedUserData, error } = await pipeline.run();
-        
-        // Clear the timeout now that we've completed
-        timeout.clearTimeout();
-        
-        // Check if collection was interrupted by rate limiting
-        const currentProgress = await fastify.redis.get(progressKey);
-        if (currentProgress) {
-          const progress = JSON.parse(currentProgress);
-          if (progress.status === 'rate-limited') {
-            throw new Error(JSON.stringify(createJobFailure("Twitter API rate limit detected. Collection stopped.", {
-              type: 'rate-limited',
-              shouldRetry: false,
-              details: {
-                username: job.data.username,
-                stuckAt: progress.lastUpdate,
-                tweetsCollected: tweets?.length || 0
-              }
-            })));
-          }
-        }
-        
-        // Check if pipeline reported an error but didn't throw (like auth failure)
-        if (error && error.type === 'authentication') {
-          throw new Error(JSON.stringify(createJobFailure(error.message, {
-            type: 'authentication',
-            shouldRetry: false,
-            details: {
-              username: job.data.username,
-              credentialsProvided: !!job.data.options?.credentials
-            }
-          })));
-        }
-        
-        // If we have no tweets, might be an issue
-        if (!tweets || tweets.length === 0) {
-          // Check if it's a public profile but we got no tweets
-          if (scrapedUserData && scrapedUserData.statusesCount > 0) {
-            fastify.log.warn(`No tweets collected for @${job.data.username} despite user having ${scrapedUserData.statusesCount} tweets`);
+        try {
+          // Make sure to wrap the pipeline.run() in a try/catch block
+          // and use .catch to handle any unhandled promise rejections
+          const result = await pipeline.run().catch(err => {
+            // Convert any uncaught errors to a structured response
+            fastify.log.error(`Caught unhandled error in pipeline.run(): ${err.message}`);
             
-            // This might be a sign of rate limiting or other issues
-            if (pipeline.stats.rateLimitHits > 0) {
-              throw new Error(JSON.stringify(createJobFailure("Possible Twitter API rate limit. No tweets collected.", {
+            // Parse the error message if it's JSON
+            let parsedError = null;
+            try {
+              // Check if the error is already a structured error
+              parsedError = JSON.parse(err.message);
+            } catch (parseErr) {
+              // Not JSON, create a structured error
+              parsedError = {
+                type: err.isRateLimit ? 'rate-limited' : 'unknown',
+                message: err.message
+              };
+            }
+            
+            // Return a structured object with empty tweets and the error info
+            return {
+              tweets: [],
+              user: null,
+              error: {
+                type: parsedError.type || 'unknown',
+                message: parsedError.message || err.message,
+                details: parsedError.details || {
+                  isRateLimit: !!err.isRateLimit,
+                  stackTrace: err.stack
+                }
+              }
+            };
+          });
+          
+          // Clean up timeouts immediately to avoid potential issues
+          if (collectionTimeout) {
+            clearTimeout(collectionTimeout);
+            collectionTimeout = null;
+          }
+          
+          // Clear the progress timeout now
+          if (timeout && typeof timeout.clearTimeout === 'function') {
+            timeout.clearTimeout();
+          }
+          
+          // Extract the values we need from the result (with defaults)
+          const { tweets = [], user: scrapedUserData = null, error = null } = result || {};
+          
+          // Check for errors from the pipeline
+          if (error) {
+            // Handle various error types
+            if (error.type === 'authentication' || error.type === 'rate-limited' || error.type === 'configuration') {
+              // Mark as non-retriable
+              await fastify.redis.set(nonRetriableKey, '1', 'EX', 86400); // 24 hours
+              
+              // If it's a rate limit, also mark the user
+              if (error.type === 'rate-limited' && job.data.username) {
+                const rateLimitKey = `rate-limit:${job.data.username}`;
+                await fastify.redis.set(rateLimitKey, Date.now().toString(), 'EX', 15 * 60); // 15 min
+              }
+              
+              // Create an appropriate error message based on the type
+              let errorMsg;
+              switch (error.type) {
+                case 'authentication':
+                  errorMsg = error.message || "Authentication failed. Check your Twitter credentials.";
+                  break;
+                case 'rate-limited':
+                  errorMsg = error.message || "Twitter API rate limit detected. Please try again later.";
+                  break;
+                case 'configuration':
+                  errorMsg = error.message || "Configuration error. Please check your settings.";
+                  break;
+                default:
+                  errorMsg = error.message || "An unknown error occurred.";
+              }
+              
+              throw new Error(JSON.stringify(createJobFailure(errorMsg, {
+                type: error.type,
+                shouldRetry: false,
+                details: {
+                  username: job.data.username,
+                  ...(error.details || {})
+                }
+              })));
+            }
+            
+            // For other error types, log and continue
+            fastify.log.warn(`Pipeline returned error: ${error.message || 'Unknown error'}`);
+          }
+          
+          // Check if collection was interrupted by rate limiting
+          const currentProgress = await fastify.redis.get(progressKey);
+          if (currentProgress) {
+            const progress = JSON.parse(currentProgress);
+            if (progress.status === 'rate-limited') {
+              // If we have tweets, return them as a partial success
+              if (tweets && tweets.length > 0) {
+                fastify.log.warn(`Rate limited but collected ${tweets.length} tweets - returning partial results`);
+                
+                // Store partial results if requested
+                let dbResult = null;
+                if (job.data.storeInDatabase) {
+                  try {
+                    dbResult = await storeTweetsInDatabase(fastify, job.data.username, tweets, scrapedUserData);
+                  } catch (dbError) {
+                    fastify.log.error(`Database storage failed: ${dbError.message}`);
+                  }
+                }
+                
+                return {
+                  status: 'partial_success',
+                  message: 'Rate limited during collection',
+                  username: job.data.username,
+                  tweetCount: tweets.length,
+                  database: dbResult ? {
+                    savedCount: dbResult.savedCount,
+                    skippedCount: dbResult.skippedCount || 0
+                  } : null
+                };
+              }
+              
+              // Mark the user as rate limited
+              const rateLimitKey = `rate-limit:${job.data.username}`;
+              await fastify.redis.set(rateLimitKey, Date.now().toString(), 'EX', 15 * 60); // 15 min expiry
+              
+              // Otherwise throw a rate limit error
+              throw new Error(JSON.stringify(createJobFailure("Twitter API rate limit detected. Collection stopped.", {
                 type: 'rate-limited',
                 shouldRetry: false,
                 details: {
                   username: job.data.username,
-                  rateLimitHits: pipeline.stats.rateLimitHits,
-                  knownTweetCount: scrapedUserData.statusesCount
+                  stuckAt: progress.lastUpdate,
+                  tweetsCollected: tweets?.length || 0
                 }
               })));
             }
           }
+          
+          // If we have no tweets, might be an issue
+          if (!tweets || tweets.length === 0) {
+            // Check if it's a public profile but we got no tweets
+            if (scrapedUserData && scrapedUserData.statusesCount > 0) {
+              fastify.log.warn(`No tweets collected for @${job.data.username} despite user having ${scrapedUserData.statusesCount} tweets`);
+              
+              // This might be a sign of rate limiting or other issues
+              if (pipeline.stats.rateLimitHits > 0) {
+                throw new Error(JSON.stringify(createJobFailure("Possible Twitter API rate limit. No tweets collected.", {
+                  type: 'rate-limited',
+                  shouldRetry: false,
+                  details: {
+                    username: job.data.username,
+                    rateLimitHits: pipeline.stats.rateLimitHits,
+                    knownTweetCount: scrapedUserData.statusesCount
+                  }
+                })));
+              }
+            }
+          }
+          
+          // Store in database if flag is set
+          let dbResult = null;
+          if (job.data.storeInDatabase) {
+            dbResult = await storeTweetsInDatabase(fastify, job.data.username, tweets, scrapedUserData);
+          }
+          
+          return {
+            status: 'success',
+            message: `Successfully collected ${tweets.length} tweets for @${job.data.username}`,
+            username: job.data.username,
+            tweetCount: tweets.length,
+            database: dbResult ? {
+              savedCount: dbResult.savedCount,
+              skippedCount: dbResult.skippedCount || 0
+            } : null
+          };
+        } catch (error) {
+          // Make sure to clean up the timeout
+          timeout.clearTimeout();
+          
+          // Also clean up the collection timeout if it exists
+          if (collectionTimeout) {
+            clearTimeout(collectionTimeout);
+            collectionTimeout = null;
+          }
+          
+          fastify.log.error(`Failed to scrape tweets for @${job.data.username}: ${error.message}`);
+          throw error;
         }
-        
-        // Store in database if flag is set
-        let dbResult = null;
-        if (job.data.storeInDatabase) {
-          dbResult = await storeTweetsInDatabase(fastify, job.data.username, tweets, scrapedUserData);
-        }
-        
-        // Return the results
-        return {
-          status: 'success',
-          username: job.data.username,
-          tweetCount: tweets?.length || 0,
-          database: dbResult ? {
-            savedCount: dbResult.savedCount,
-            skippedCount: dbResult.skippedCount || 0
-          } : null
-        };
       } catch (error) {
         // Make sure to clean up the timeout
-        timeout.clearTimeout();
+        timeout?.clearTimeout?.();
         
         fastify.log.error(`Failed to scrape tweets for @${job.data.username}: ${error.message}`);
         throw error;
@@ -463,7 +590,8 @@ async function queuePlugin(fastify, options) {
           // Save rate limit information - this could be used to implement a backoff strategy
           // for the specific user or globally
           const rateLimitKey = `rate-limit:${job.data.username}`;
-          await fastify.redis.set(rateLimitKey, Date.now().toString(), 'EX', 3600);
+          const rateLimitDuration = parseInt(process.env.RATE_LIMIT_KEY_EXPIRY) || 3600; // Get from env var or default to 1 hour
+          await fastify.redis.set(rateLimitKey, Date.now().toString(), 'EX', rateLimitDuration);
           
           // Increment global rate limit counter for monitoring
           await fastify.redis.incr('rate-limit-count').catch(() => {});

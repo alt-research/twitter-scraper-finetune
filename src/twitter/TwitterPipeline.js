@@ -44,7 +44,7 @@ class TwitterPipeline {
       `${this.credentials.username}_cookies.json`
     );
 
-    // Enhanced configuration with fallback handling
+    // Enhanced configuration with environment variables and fallback handling
     this.config = {
       twitter: {
         maxTweets: parseInt(options.maxTweets || process.env.MAX_TWEETS) || 50000,
@@ -52,7 +52,15 @@ class TwitterPipeline {
         retryDelay: parseInt(options.retryDelay || process.env.RETRY_DELAY) || 5000,
         minDelayBetweenRequests: parseInt(options.minDelay || process.env.MIN_DELAY) || 1000,
         maxDelayBetweenRequests: parseInt(options.maxDelay || process.env.MAX_DELAY) || 3000,
-        rateLimitThreshold: 3, // Number of rate limits before considering fallback
+        rateLimitThreshold: parseInt(process.env.RATE_LIMIT_THRESHOLD) || 3,
+        baseRateLimitDelay: parseInt(process.env.RATE_LIMIT_BASE_DELAY) || 60000,
+        maxRateLimitDelay: parseInt(process.env.RATE_LIMIT_MAX_DELAY) || 15 * 60 * 1000,
+        rateLimitDuration: parseInt(process.env.RATE_LIMIT_DURATION) || 15 * 60 * 1000,
+      },
+      timeouts: {
+        globalTimeout: parseInt(process.env.COLLECTION_GLOBAL_TIMEOUT) || 60 * 1000,
+        stallTimeout: parseInt(process.env.COLLECTION_STALL_TIMEOUT) || 15000,
+        progressCheckInterval: parseInt(process.env.COLLECTION_PROGRESS_CHECK) || 2000,
       },
       fallback: {
         enabled: options.fallbackEnabled !== undefined ? options.fallbackEnabled : true,
@@ -137,10 +145,13 @@ class TwitterPipeline {
       console.log(`TWITTER_USERNAME=your_username`);
       console.log(`TWITTER_PASSWORD=your_password`);
       console.log(`TWITTER_EMAIL=your_email`);
-      process.exit(1);
+      
+      // Return false instead of calling process.exit(1)
+      return false;
     }
     
     Logger.stopSpinner();
+    return true;
   }
 
   async loadCookies() {
@@ -365,8 +376,8 @@ class TwitterPipeline {
 
   async handleRateLimit(retryCount = 1) {
     this.stats.rateLimitHits++;
-    const baseDelay = 60000; // 1 minute
-    const maxDelay = 15 * 60 * 1000; // 15 minutes
+    const baseDelay = this.config.twitter.baseRateLimitDelay;
+    const maxDelay = this.config.twitter.maxRateLimitDelay;
 
     // Exponential backoff with small jitter
     const exponentialDelay = baseDelay * Math.pow(2, retryCount - 1);
@@ -555,8 +566,53 @@ class TwitterPipeline {
       let previousCount = 0;
       let stagnantBatches = 0;
       const MAX_STAGNANT_BATCHES = 2;
+      
+      // Setup stall detection
+      let lastProgressTime = Date.now();
+      let lastTweetCount = 0;
+      let stallDetectionInterval = null;
+      let isStalled = false;
+      
+      // Create a stall detection interval that checks for progress
+      const MAX_STALL_TIME = this.config.timeouts.stallTimeout;
+      const PROGRESS_CHECK_INTERVAL = this.config.timeouts.progressCheckInterval;
+      
+      stallDetectionInterval = setInterval(() => {
+        const currentCount = allTweets.size;
+        const timeSinceProgress = Date.now() - lastProgressTime;
+        
+        if (currentCount > lastTweetCount) {
+          // Progress was made, reset the timer
+          lastProgressTime = Date.now();
+          lastTweetCount = currentCount;
+          Logger.debug(`Collection progress: ${currentCount} tweets`);
+        } else if (timeSinceProgress > MAX_STALL_TIME && !isStalled) {
+          // No progress for too long - likely rate limited
+          // Don't throw directly as it could crash the server - just mark as stalled
+          isStalled = true;
+          
+          // Log the stall detection
+          Logger.warn(`⚠️ Collection stalled for ${Math.round(timeSinceProgress/1000)}s - likely rate limited`);
+          
+          // Update rate limit hit counter
+          this.stats.rateLimitHits++;
+          
+          // Break out of collection loop early by forcing the interval to check very frequently
+          clearInterval(stallDetectionInterval);
+          stallDetectionInterval = setInterval(() => {
+            // This smaller interval just keeps checking if we've broken out of the loop
+            if (isStalled) {
+              Logger.debug("Still waiting to break out of collection loop...");
+            } else {
+              // If somehow not stalled anymore, clear this interval
+              clearInterval(stallDetectionInterval);
+              stallDetectionInterval = null;
+            }
+          }, 500); // Check every 500ms
+        }
+      }, PROGRESS_CHECK_INTERVAL);
 
-      // Try main collection first
+      // Try main collection
       try {
         const searchResults = scraper.searchTweets(
           `from:${this.username}`,
@@ -565,10 +621,17 @@ class TwitterPipeline {
         );
 
         for await (const tweet of searchResults) {
+          // Check if we've been stalled - break out of the loop safely
+          if (isStalled) {
+            Logger.warn("Breaking out of collection loop due to detected stall");
+            break;
+          }
+          
           if (tweet && !allTweets.has(tweet.id)) {
             const processedTweet = this.processTweetData(tweet);
             if (processedTweet) {
               allTweets.set(tweet.id, processedTweet);
+              this.stats.uniqueTweets = allTweets.size; // Update the uniqueTweets counter
 
               if (allTweets.size % 100 === 0) {
                 const completion = (
@@ -595,35 +658,77 @@ class TwitterPipeline {
             }
           }
         }
+        
+        // Clear the interval after collection completes
+        if (stallDetectionInterval) {
+          clearInterval(stallDetectionInterval);
+          stallDetectionInterval = null;
+        }
       } catch (error) {
-        if (error.message.includes("rate limit")) {
+        // Make sure to clear the interval to prevent memory leaks
+        if (stallDetectionInterval) {
+          clearInterval(stallDetectionInterval);
+          stallDetectionInterval = null;
+        }
+        
+        // Mark as stalled if we hit an error during collection
+        isStalled = true;
+        this.stats.rateLimitHits++;
+        
+        // Check for rate limit related errors
+        if (error.message.includes("rate limit") || error.message.includes("too many requests")) {
+          Logger.warn(`Rate limit error from scraper: ${error.message}`);
           await this.handleRateLimit(this.stats.rateLimitHits + 1);
 
           // Consider fallback if rate limits are frequent
-          if (
-            this.stats.rateLimitHits >= this.config.twitter.rateLimitThreshold
-          ) {
+          if (this.stats.rateLimitHits >= this.config.twitter.rateLimitThreshold && this.config.fallback.enabled) {
             Logger.info("Switching to fallback collection...");
-            const fallbackTweets = await this.collectWithFallback(
-              `from:${this.username}`
-            );
+            try {
+              const fallbackTweets = await this.collectWithFallback(`from:${this.username}`);
 
-            fallbackTweets.forEach((tweet) => {
-              if (!allTweets.has(tweet.id)) {
-                const processedTweet = this.processTweetData(tweet);
-                if (processedTweet) {
-                  allTweets.set(tweet.id, processedTweet);
-                  this.stats.fallbackUsed = true;
+              fallbackTweets.forEach((tweet) => {
+                if (!allTweets.has(tweet.id)) {
+                  const processedTweet = this.processTweetData(tweet);
+                  if (processedTweet) {
+                    allTweets.set(tweet.id, processedTweet);
+                    this.stats.fallbackUsed = true;
+                  }
                 }
-              }
-            });
+              });
+            } catch (fallbackError) {
+              Logger.error(`Fallback collection failed: ${fallbackError.message}`);
+            }
           }
+        } else {
+          // Log non-rate-limit errors
+          Logger.warn(`⚠️ Search error: ${error.message}`);
         }
-        Logger.warn(`⚠️  Search error: ${error.message}`);
+      }
+      
+      // Check if we were stalled and need to try fallback
+      if (isStalled && allTweets.size === 0 && this.config.fallback.enabled) {
+        // Use fallback collection since we were stalled with no tweets
+        Logger.info("Trying fallback collection due to stall...");
+        try {
+          const fallbackTweets = await this.collectWithFallback(`from:${this.username}`);
+          
+          fallbackTweets.forEach((tweet) => {
+            if (!allTweets.has(tweet.id)) {
+              const processedTweet = this.processTweetData(tweet);
+              if (processedTweet) {
+                allTweets.set(tweet.id, processedTweet);
+                this.stats.fallbackUsed = true;
+              }
+            }
+          });
+        } catch (fallbackError) {
+          Logger.error(`Fallback collection failed: ${fallbackError.message}`);
+        }
       }
 
-      // Use fallback for replies if needed
+      // Use fallback for additional tweets if needed
       if (
+        !isStalled && 
         allTweets.size < totalExpectedTweets * 0.8 &&
         this.config.fallback.enabled
       ) {
@@ -656,18 +761,24 @@ class TwitterPipeline {
         }
       }
 
-      Logger.success(
-        `\n🎉 Collection complete! ${allTweets.size.toLocaleString()} unique tweets collected${
-          this.stats.fallbackUsed
-            ? ` (including ${this.stats.fallbackCount} from fallback)`
-            : ""
-        }`
-      );
+      // Even if we were stalled, return what we managed to collect
+      if (isStalled) {
+        Logger.warn(`Collection was stalled. Returning ${allTweets.size} tweets that were collected.`);
+      } else {
+        Logger.success(
+          `\n🎉 Collection complete! ${allTweets.size.toLocaleString()} unique tweets collected${
+            this.stats.fallbackUsed
+              ? ` (including ${this.stats.fallbackCount} from fallback)`
+              : ""
+          }`
+        );
+      }
 
       return Array.from(allTweets.values());
     } catch (error) {
       Logger.error(`Failed to collect tweets: ${error.message}`);
-      throw error;
+      // Return empty array rather than throwing to prevent server crash
+      return [];
     }
   }
 
@@ -815,24 +926,111 @@ class TwitterPipeline {
     );
 
     try {
-      await this.validateEnvironment();
-
-      // Initialize main scraper
-      const scraperInitialized = await this.initializeScraper();
-      if (!scraperInitialized && !this.config.fallback.enabled) {
-        throw new Error(
-          "Failed to initialize scraper and fallback is disabled"
-        );
+      // Check environment and credentials
+      const isEnvironmentValid = await this.validateEnvironment();
+      if (!isEnvironmentValid) {
+        const errorMsg = "Missing required Twitter credentials.";
+        Logger.error(errorMsg);
+        
+        // Return an empty result that indicates missing credentials
+        await this.partialCleanup();
+        return { 
+          tweets: [], 
+          user: null,
+          error: {
+            type: 'configuration',
+            message: errorMsg,
+            details: {
+              username: this.username,
+              credentialsProvided: false
+            }
+          }
+        };
       }
 
-      // Start collection
-      Logger.startSpinner(`Collecting tweets from @${this.username}`);
-      const allTweets = await this.collectTweets(this.scraper);
-      Logger.stopSpinner();
+      // Initialize main scraper - fail fast if authentication fails
+      const scraperInitialized = await this.initializeScraper();
+      if (!scraperInitialized) {
+        const errorMsg = "Twitter authentication failed after maximum retries.";
+        Logger.error(errorMsg);
+        
+        // Authentication failed, so we don't need to continue
+        // We'll return an empty result that indicates auth failure
+        await this.partialCleanup();
+        return { 
+          tweets: [], 
+          user: null,
+          error: {
+            type: 'authentication',
+            message: errorMsg
+          }
+        };
+      }
 
+      // Set a global timeout for the entire collection process
+      const GLOBAL_TIMEOUT = this.config.timeouts.globalTimeout;
+      let globalTimeoutId = null;
+      let isTimedOut = false;
+      
+      // Create a wrapper that handles global timeout
+      const runWithTimeout = async () => {
+        // Set up timeout
+        return new Promise((resolve) => {
+          // Start the global timeout
+          globalTimeoutId = setTimeout(() => {
+            isTimedOut = true;
+            Logger.warn(`⚠️ Global collection timeout reached after ${GLOBAL_TIMEOUT/1000}s`);
+            // Resolve with empty array instead of rejecting
+            resolve([]);
+          }, GLOBAL_TIMEOUT);
+          
+          // Run the actual collection
+          Logger.startSpinner(`Collecting tweets from @${this.username}`);
+          this.collectTweets(this.scraper).then(tweets => {
+            Logger.stopSpinner();
+            // Clear timeout
+            if (globalTimeoutId) {
+              clearTimeout(globalTimeoutId);
+              globalTimeoutId = null;
+            }
+            resolve(tweets);
+          }).catch(error => {
+            Logger.stopSpinner(false);
+            Logger.error(`Collection error: ${error.message}`);
+            // Clear timeout
+            if (globalTimeoutId) {
+              clearTimeout(globalTimeoutId);
+              globalTimeoutId = null;
+            }
+            // Resolve with empty array to prevent crashes
+            resolve([]);
+          });
+        });
+      };
+      
+      // Run collection with timeout
+      const allTweets = await runWithTimeout();
+      
+      // Check if we got any tweets
       if (allTweets.length === 0) {
-        Logger.warn("⚠️  No tweets collected");
-        return { tweets: [], user: null };
+        if (isTimedOut) {
+          Logger.warn("⚠️ Collection timed out with no tweets collected");
+        } else {
+          Logger.warn("⚠️ No tweets collected - possible rate limiting");
+        }
+        
+        // Return with an error indicating rate limiting or timeout
+        await this.partialCleanup();
+        return { 
+          tweets: [], 
+          user: null,
+          error: {
+            type: 'rate-limited',
+            message: isTimedOut ? 
+              "Tweet collection timed out after " + (GLOBAL_TIMEOUT/1000) + " seconds" : 
+              "No tweets collected due to possible rate limiting"
+          }
+        };
       }
 
       // Get user profile data
@@ -853,7 +1051,7 @@ class TwitterPipeline {
         dbResult = await this.storeInDatabase(allTweets, userData);
       } catch (dbError) {
         Logger.error(`Database storage failed: ${dbError.message}`);
-        throw dbError; // Re-throw as we're only using the database for storage now
+        // Don't throw - we'll still return the tweets we collected
       }
 
       // Calculate final statistics
