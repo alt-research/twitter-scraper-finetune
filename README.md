@@ -70,6 +70,39 @@ Twitter credentials can be provided in three ways:
 
 This flexibility allows you to use different Twitter accounts for different scraping operations without changing the `.env` file. The environment variables are used as defaults when credentials are not explicitly provided.
 
+### Logging System
+
+The application includes a comprehensive logging system that writes logs to both the console and files. This makes it easier to debug issues and monitor the application's behavior.
+
+#### Log Files
+
+Logs are written to the `logs` directory (configurable via `LOG_DIR` environment variable) with the following structure:
+
+- **{date}-info.log**: Contains all info-level messages
+- **{date}-error.log**: Contains error messages
+- **{date}-debug.log**: Contains debug and trace messages
+- **{date}-combined.log**: Contains all messages from all levels
+- **{date}-pipeline-*.log**: Pipeline-specific logs (from the Twitter scraper)
+
+#### Log Configuration
+
+You can configure logging behavior using these environment variables:
+
+- `LOG_LEVEL`: Sets the minimum level of logs to display (trace, debug, info, warn, error, fatal)
+- `LOG_DIR`: Directory to store log files (default: `logs`)
+- `LOG_TO_FILE`: Enable/disable file logging (default: `true`)
+- `DEBUG`: Enable debug output in the console (default: `false`)
+
+#### TypeORM Database Logging
+
+The TypeORM logging is configured to be less verbose by default, showing only:
+- Errors and warnings
+- Schema operations
+- Migration operations
+- Slow queries (taking more than 1 second)
+
+This prevents your logs from being flooded with SQL statements while still providing the important information you need for debugging.
+
 ### Legacy Twitter Collection (deprecated)
 ```bash
 npm run twitter -- username

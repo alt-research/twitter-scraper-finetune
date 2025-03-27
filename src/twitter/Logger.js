@@ -2,6 +2,8 @@ import chalk from 'chalk';
 import ora from 'ora';
 import Table from 'cli-table3';
 import { format } from 'date-fns';
+import fs from 'fs';
+import path from 'path';
 
 class Logger {
   static spinner = null;
@@ -22,9 +24,122 @@ class Logger {
   
   // Determine if debug logs should be shown based on an environment variable
   static isDebugEnabled = process.env.DEBUG === 'true';
+  
+  // File logging configuration
+  static logDir = process.env.LOG_DIR || path.join(process.cwd(), 'logs');
+  static logToFile = process.env.LOG_TO_FILE !== 'false'; // Enable file logging by default
+  static currentDate = format(new Date(), 'yyyy-MM-dd');
+  static logFiles = {
+    info: null,
+    warn: null,
+    error: null,
+    debug: null,
+    combined: null
+  };
+  
+  // Initialize file logging
+  static initFileLogging() {
+    if (!this.logToFile) return;
+    
+    try {
+      // Create logs directory if it doesn't exist
+      if (!fs.existsSync(this.logDir)) {
+        fs.mkdirSync(this.logDir, { recursive: true });
+      }
+      
+      // Create log files
+      this.logFiles.info = fs.createWriteStream(
+        path.join(this.logDir, `${this.currentDate}-pipeline-info.log`), 
+        { flags: 'a' }
+      );
+      
+      this.logFiles.warn = fs.createWriteStream(
+        path.join(this.logDir, `${this.currentDate}-pipeline-warn.log`), 
+        { flags: 'a' }
+      );
+      
+      this.logFiles.error = fs.createWriteStream(
+        path.join(this.logDir, `${this.currentDate}-pipeline-error.log`), 
+        { flags: 'a' }
+      );
+      
+      this.logFiles.debug = fs.createWriteStream(
+        path.join(this.logDir, `${this.currentDate}-pipeline-debug.log`), 
+        { flags: 'a' }
+      );
+      
+      this.logFiles.combined = fs.createWriteStream(
+        path.join(this.logDir, `${this.currentDate}-pipeline-combined.log`), 
+        { flags: 'a' }
+      );
+      
+      // Log initialization
+      this.writeToFile('info', 'File logging initialized');
+      
+      // Setup process exit handlers to close log files
+      process.on('exit', () => this.closeLogFiles());
+      process.on('SIGINT', () => {
+        this.writeToFile('info', 'Process interrupted, closing log files');
+        this.closeLogFiles();
+        process.exit(0);
+      });
+      
+    } catch (error) {
+      console.error(`Failed to initialize file logging: ${error.message}`);
+      this.logToFile = false;
+    }
+  }
+  
+  // Format log message for file
+  static formatLogMessage(level, msg) {
+    const timestamp = format(new Date(), 'yyyy-MM-dd HH:mm:ss.SSS');
+    return `[${timestamp}] [${level.toUpperCase()}] ${msg}\n`;
+  }
+  
+  // Write to log file
+  static writeToFile(level, msg) {
+    if (!this.logToFile) return;
+    
+    // Initialize file logging if not already done
+    if (!this.logFiles.combined) {
+      this.initFileLogging();
+    }
+    
+    try {
+      const formattedMsg = this.formatLogMessage(level, msg);
+      
+      // Write to level-specific log file
+      if (this.logFiles[level]) {
+        this.logFiles[level].write(formattedMsg);
+      }
+      
+      // Write to combined log file
+      if (this.logFiles.combined) {
+        this.logFiles.combined.write(formattedMsg);
+      }
+    } catch (error) {
+      console.error(`Failed to write to log file: ${error.message}`);
+    }
+  }
+  
+  // Close log files
+  static closeLogFiles() {
+    if (!this.logToFile) return;
+    
+    try {
+      for (const stream of Object.values(this.logFiles)) {
+        if (stream) {
+          stream.end();
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to close log files: ${error.message}`);
+    }
+  }
 
   static startSpinner(text) {
     this.spinner = ora(text).start();
+    this.writeToFile('info', text);
   }
 
   static stopSpinner(success = true) {
@@ -36,25 +151,29 @@ class Logger {
 
   static info(msg) {
     console.log(chalk.blue(`ℹ️  ${msg}`));
+    this.writeToFile('info', msg);
   }
 
   static success(msg) {
     console.log(chalk.green(`✅ ${msg}`));
+    this.writeToFile('info', `SUCCESS: ${msg}`);
   }
 
   static warn(msg) {
     console.log(chalk.yellow(`⚠️  ${msg}`));
+    this.writeToFile('warn', msg);
   }
 
   static error(msg) {
     console.log(chalk.red(`❌ ${msg}`));
+    this.writeToFile('error', msg);
   }
 
-  // Add the debug method
   static debug(msg) {
     if (this.isDebugEnabled) {
       console.log(chalk.gray(`🔍 Debug: ${msg}`));
     }
+    this.writeToFile('debug', msg);
   }
 
   static updateCollectionProgress({
@@ -141,15 +260,19 @@ class Logger {
     );
 
     console.log(table.toString());
-
+    
     // Add running time
     const runningTime = Math.floor((Date.now() - this.collectionStats.startTime) / 1000);
     console.log(chalk.dim(`\nRunning for ${Math.floor(runningTime / 60)}m ${runningTime % 60}s`));
+    
+    // Log to file
+    this.writeToFile('info', `Status: ${totalCollected} tweets collected, ${newInBatch} new in latest batch, running for ${Math.floor(runningTime / 60)}m ${runningTime % 60}s`);
   }
 
   static recordRateLimit() {
     this.collectionStats.rateLimitHits++;
     this.collectionStats.lastResetTime = Date.now();
+    this.writeToFile('warn', 'Rate limit hit recorded');
   }
 
   static stats(title, data) {
@@ -162,6 +285,12 @@ class Logger {
       table.push([chalk.white(key), value]);
     });
     console.log(table.toString());
+    
+    // Log statistics to file
+    this.writeToFile('info', `STATS - ${title}:`);
+    Object.entries(data).forEach(([key, value]) => {
+      this.writeToFile('info', `  ${key}: ${value}`);
+    });
   }
 
   static reset() {
@@ -178,7 +307,11 @@ class Logger {
       lastResetTime: null
     };
     this.lastUpdate = Date.now();
+    this.writeToFile('info', 'Logger stats reset');
   }
 }
+
+// Initialize file logging when module is loaded
+Logger.initFileLogging();
 
 export default Logger;
