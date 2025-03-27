@@ -1335,7 +1335,13 @@ class TwitterPipeline {
     }
   }
 
-  // Add a method that can be called to interrupt any ongoing operation
+  /**
+   * Safely interrupts any ongoing operation in the pipeline
+   * This can be called externally to terminate a stuck collection
+   * without crashing the server or losing collected data
+   * 
+   * @returns {void}
+   */
   interrupt() {
     Logger.warn('Pipeline interrupt requested');
     this.forceTerminated = true;

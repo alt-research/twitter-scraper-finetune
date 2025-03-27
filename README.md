@@ -531,11 +531,12 @@ The Twitter scraper can be configured using the following environment variables:
 - `RATE_LIMIT_THRESHOLD`: Number of rate limits before switching to fallback collection (default: 3)
 
 ### Timeout Settings
-- `COLLECTION_GLOBAL_TIMEOUT`: Global timeout for the entire collection process in milliseconds (default: 60000)
+- `COLLECTION_GLOBAL_TIMEOUT`: Global timeout for the entire collection process in milliseconds (default: 120000 - 2 minutes)
 - `COLLECTION_STALL_TIMEOUT`: Time without progress before marking collection as stalled in milliseconds (default: 15000)
 - `COLLECTION_PROGRESS_CHECK`: How often to check collection progress in milliseconds (default: 2000)
 - `JOB_STALL_TIMEOUT`: Time without progress in a job before marking as stalled in milliseconds (default: 45000)
 - `JOB_PROGRESS_CHECK`: How often to check job progress in milliseconds (default: 5000)
+- `FORCED_BREAK_TIMEOUT`: Maximum time to wait for breaking out of a stalled collection loop in milliseconds (default: 120000 - 2 minutes)
 
 ### Rate Limit Settings
 - `RATE_LIMIT_BASE_DELAY`: Base delay for rate limit backoff in milliseconds (default: 60000)
@@ -547,4 +548,39 @@ The Twitter scraper can be configured using the following environment variables:
 - `NON_RETRIABLE_KEY_EXPIRY`: Redis key expiry for non-retriable flags in seconds (default: 86400)
 - `PROGRESS_KEY_EXPIRY`: Redis key expiry for progress tracking in seconds (default: 3600)
 
-Copy the `.env.example` file to `.env` and customize the settings as needed for your environment. 
+Copy the `.env.example` file to `.env` and customize the settings as needed for your environment.
+
+## Robust Error Handling
+
+The Twitter scraper includes advanced error handling for various scenarios:
+
+### Authentication Failures
+- Failed Twitter authentication is detected early and jobs are marked as non-retriable
+- Detailed error messages show why authentication failed
+- Authentication failures are properly communicated to users through the API
+
+### Rate Limit Detection
+- The system detects when Twitter rate limits are encountered
+- Rate-limited accounts are tracked in Redis to prevent repeated failures
+- Jobs for rate-limited accounts are marked as non-retriable for a configurable duration
+- Detailed logs indicate when rate limiting occurs
+
+### Stall Detection
+- The collector detects when tweet collection is stalled (no new tweets collected)
+- After a configurable timeout, stalled collections are gracefully terminated
+- If partial results were collected, they are saved rather than discarded
+- Redis tracks collection progress to detect stalls even during long operations
+
+### Force Termination
+- Collections that stall excessively can be force-terminated
+- The system includes a safety mechanism to prevent permanently stuck collections
+- Force-terminated jobs are properly marked as failed in the job queue
+- Resources are properly cleaned up after force terminations
+
+### Job Queue Management
+- Failed jobs are properly tracked and can be managed through the API
+- Jobs with unrecoverable errors are marked as non-retriable to prevent wasting resources
+- Structured error responses provide detailed information about failure causes
+- The system tracks active pipelines to ensure proper termination
+
+These error handling mechanisms ensure your Twitter scraper is robust and recovers gracefully from failures without crashing the server or requiring manual intervention. 
