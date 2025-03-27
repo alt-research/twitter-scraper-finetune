@@ -37,7 +37,15 @@ export const AppDataSource = new DataSource({
   database: process.env.DB_DATABASE || 'twitter_scraper',
   // synchronize: nodeEnv === 'development', // Auto-create schema in development
   synchronize: false,
-  logging: nodeEnv === 'development',
+  logging: [
+    'error',
+    'warn',
+    'info',
+    'schema',
+    'migration',
+    'query-slow'
+  ],
+  maxQueryExecutionTime: 1000, // Log queries that take more than 1 second
   entities: [path.join(__dirname, 'entities', '*.js')],
   migrations: [path.join(__dirname, 'migrations', '*.js')],
   migrationsRun: false,

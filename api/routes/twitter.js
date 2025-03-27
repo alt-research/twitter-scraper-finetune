@@ -952,6 +952,126 @@ async function twitterRoutes(fastify, options) {
       return { error: error.message };
     }
   });
+
+  // Get list of available log files
+  fastify.get('/logs', {
+    schema: {
+      description: 'Get a list of available log files',
+      tags: ['logs'],
+      response: {
+        200: {
+          description: 'List of log files',
+          type: 'object',
+          properties: {
+            logDirectory: { type: 'string' },
+            logs: { 
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  filename: { type: 'string' },
+                  size: { type: 'number' },
+                  created: { type: 'string', format: 'date-time' }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      // Use the getLogFilesPath method added by the file-logger plugin
+      if (!fastify.getLogFilesPath) {
+        return { logDirectory: null, logs: [] };
+      }
+      
+      const logPaths = fastify.getLogFilesPath();
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      
+      // Get all files in the logs directory
+      const files = await fs.readdir(logPaths.directory);
+      
+      // Get stats for each file
+      const logFiles = await Promise.all(
+        files.map(async (file) => {
+          const filePath = path.join(logPaths.directory, file);
+          const stats = await fs.stat(filePath);
+          
+          return {
+            filename: file,
+            size: stats.size,
+            created: stats.birthtime.toISOString()
+          };
+        })
+      );
+      
+      // Sort by newest first
+      logFiles.sort((a, b) => new Date(b.created) - new Date(a.created));
+      
+      return {
+        logDirectory: logPaths.directory,
+        logs: logFiles
+      };
+    } catch (error) {
+      fastify.log.error(`Failed to get log files: ${error.message}`);
+      reply.code(500);
+      return { error: 'Failed to get log files' };
+    }
+  });
+  
+  // Download a specific log file
+  fastify.get('/logs/:filename', {
+    schema: {
+      description: 'Download a specific log file',
+      tags: ['logs'],
+      params: {
+        type: 'object',
+        properties: {
+          filename: { type: 'string' }
+        },
+        required: ['filename']
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      // Use the getLogFilesPath method added by the file-logger plugin
+      if (!fastify.getLogFilesPath) {
+        reply.code(404);
+        return { error: 'Logging system not available' };
+      }
+      
+      const logPaths = fastify.getLogFilesPath();
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      
+      // Sanitize the filename to prevent directory traversal
+      const filename = path.basename(request.params.filename);
+      const filePath = path.join(logPaths.directory, filename);
+      
+      // Check if the file exists
+      try {
+        await fs.access(filePath);
+      } catch (error) {
+        reply.code(404);
+        return { error: 'Log file not found' };
+      }
+      
+      // Read the file
+      const content = await fs.readFile(filePath, 'utf-8');
+      
+      // Set headers for text file
+      reply.header('Content-Type', 'text/plain');
+      reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+      
+      return content;
+    } catch (error) {
+      fastify.log.error(`Failed to get log file: ${error.message}`);
+      reply.code(500);
+      return { error: 'Failed to get log file' };
+    }
+  });
 }
 
 export default twitterRoutes; 

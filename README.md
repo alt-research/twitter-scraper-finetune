@@ -70,6 +70,39 @@ Twitter credentials can be provided in three ways:
 
 This flexibility allows you to use different Twitter accounts for different scraping operations without changing the `.env` file. The environment variables are used as defaults when credentials are not explicitly provided.
 
+### Logging System
+
+The application includes a comprehensive logging system that writes logs to both the console and files. This makes it easier to debug issues and monitor the application's behavior.
+
+#### Log Files
+
+Logs are written to the `logs` directory (configurable via `LOG_DIR` environment variable) with the following structure:
+
+- **{date}-info.log**: Contains all info-level messages
+- **{date}-error.log**: Contains error messages
+- **{date}-debug.log**: Contains debug and trace messages
+- **{date}-combined.log**: Contains all messages from all levels
+- **{date}-pipeline-*.log**: Pipeline-specific logs (from the Twitter scraper)
+
+#### Log Configuration
+
+You can configure logging behavior using these environment variables:
+
+- `LOG_LEVEL`: Sets the minimum level of logs to display (trace, debug, info, warn, error, fatal)
+- `LOG_DIR`: Directory to store log files (default: `logs`)
+- `LOG_TO_FILE`: Enable/disable file logging (default: `true`)
+- `DEBUG`: Enable debug output in the console (default: `false`)
+
+#### TypeORM Database Logging
+
+The TypeORM logging is configured to be less verbose by default, showing only:
+- Errors and warnings
+- Schema operations
+- Migration operations
+- Slow queries (taking more than 1 second)
+
+This prevents your logs from being flooded with SQL statements while still providing the important information you need for debugging.
+
 ### Legacy Twitter Collection (deprecated)
 ```bash
 npm run twitter -- username
@@ -477,3 +510,77 @@ For production deployments, this project includes a Docker setup that's ready to
    
    Edit `docker-compose.yml` to uncomment the command line for the twitter-api service:
    ```
+
+# Twitter Scraper
+
+## Environment Variables
+
+The Twitter scraper can be configured using the following environment variables:
+
+### Twitter Credentials
+- `TWITTER_USERNAME`: Your Twitter username
+- `TWITTER_PASSWORD`: Your Twitter password
+- `TWITTER_EMAIL`: Your Twitter email address
+
+### Twitter Scraper Settings
+- `MAX_TWEETS`: Maximum number of tweets to collect per user (default: 50000)
+- `MAX_RETRIES`: Maximum number of retries for failed requests (default: 5)
+- `RETRY_DELAY`: Base delay between retries in milliseconds (default: 5000)
+- `MIN_DELAY`: Minimum delay between requests in milliseconds (default: 1000)
+- `MAX_DELAY`: Maximum delay between requests in milliseconds (default: 3000)
+- `RATE_LIMIT_THRESHOLD`: Number of rate limits before switching to fallback collection (default: 3)
+
+### Timeout Settings
+- `COLLECTION_GLOBAL_TIMEOUT`: Global timeout for the entire collection process in milliseconds (default: 120000 - 2 minutes)
+- `COLLECTION_STALL_TIMEOUT`: Time without progress before marking collection as stalled in milliseconds (default: 15000)
+- `COLLECTION_PROGRESS_CHECK`: How often to check collection progress in milliseconds (default: 2000)
+- `JOB_STALL_TIMEOUT`: Time without progress in a job before marking as stalled in milliseconds (default: 45000)
+- `JOB_PROGRESS_CHECK`: How often to check job progress in milliseconds (default: 5000)
+- `FORCED_BREAK_TIMEOUT`: Maximum time to wait for breaking out of a stalled collection loop in milliseconds (default: 120000 - 2 minutes)
+
+### Rate Limit Settings
+- `RATE_LIMIT_BASE_DELAY`: Base delay for rate limit backoff in milliseconds (default: 60000)
+- `RATE_LIMIT_MAX_DELAY`: Maximum delay for rate limit backoff in milliseconds (default: 900000)
+- `RATE_LIMIT_DURATION`: How long to mark a user as rate limited in milliseconds (default: 900000)
+- `RATE_LIMIT_KEY_EXPIRY`: Redis key expiry for rate limit flags in seconds (default: 900)
+
+### Redis Key Settings
+- `NON_RETRIABLE_KEY_EXPIRY`: Redis key expiry for non-retriable flags in seconds (default: 86400)
+- `PROGRESS_KEY_EXPIRY`: Redis key expiry for progress tracking in seconds (default: 3600)
+
+Copy the `.env.example` file to `.env` and customize the settings as needed for your environment.
+
+## Robust Error Handling
+
+The Twitter scraper includes advanced error handling for various scenarios:
+
+### Authentication Failures
+- Failed Twitter authentication is detected early and jobs are marked as non-retriable
+- Detailed error messages show why authentication failed
+- Authentication failures are properly communicated to users through the API
+
+### Rate Limit Detection
+- The system detects when Twitter rate limits are encountered
+- Rate-limited accounts are tracked in Redis to prevent repeated failures
+- Jobs for rate-limited accounts are marked as non-retriable for a configurable duration
+- Detailed logs indicate when rate limiting occurs
+
+### Stall Detection
+- The collector detects when tweet collection is stalled (no new tweets collected)
+- After a configurable timeout, stalled collections are gracefully terminated
+- If partial results were collected, they are saved rather than discarded
+- Redis tracks collection progress to detect stalls even during long operations
+
+### Force Termination
+- Collections that stall excessively can be force-terminated
+- The system includes a safety mechanism to prevent permanently stuck collections
+- Force-terminated jobs are properly marked as failed in the job queue
+- Resources are properly cleaned up after force terminations
+
+### Job Queue Management
+- Failed jobs are properly tracked and can be managed through the API
+- Jobs with unrecoverable errors are marked as non-retriable to prevent wasting resources
+- Structured error responses provide detailed information about failure causes
+- The system tracks active pipelines to ensure proper termination
+
+These error handling mechanisms ensure your Twitter scraper is robust and recovers gracefully from failures without crashing the server or requiring manual intervention. 

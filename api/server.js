@@ -36,7 +36,11 @@ const fastify = Fastify({
 
 // Register plugins
 async function registerPlugins() {
-  // Database plugin - must be registered first
+  // File logger plugin - register first for comprehensive logging
+  const logDir = process.env.LOG_DIR || path.join(process.cwd(), 'logs');
+  await fastify.register(import('./plugins/file-logger.js'), { logDir });
+  
+  // Database plugin - must be registered next
   await fastify.register(import('./plugins/database.js'));
   
   // Redis plugin
@@ -72,6 +76,12 @@ async function start() {
     });
     
     fastify.log.info(`Server is running on ${fastify.server.address().port}`);
+    
+    // Log files location
+    if (fastify.getLogFilesPath) {
+      const logPaths = fastify.getLogFilesPath();
+      fastify.log.info(`Log files are being written to: ${logPaths.directory}`);
+    }
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);
