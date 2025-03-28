@@ -44,8 +44,8 @@ jobs:
             type=ref,event=branch,suffix=-${{ github.run_number }}
             type=ref,event=tag
             type=ref,event=pr
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short,prefix=
             type=raw,value=${{ env.REF_NAME }},enable=${{ github.event_name == 'pull_request' }}
             type=raw,value=${{ env.GIT_BRANCH }},enable=${{ env.GIT_BRANCH != '' }}
