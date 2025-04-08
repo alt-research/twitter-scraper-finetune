@@ -42,7 +42,7 @@
   "description": "Twitter scraper microservice API built with Fastify and PostgreSQL",
   "dependencies": {
     "@fastify/swagger": "^8.14.0",
-    "@fastify/swagger-ui": "^2.0.1",
+    "@fastify/swagger-ui": "^2.1.0",
     "agent-twitter-client": "^0.0.13",
     "axios": "^1.7.7",
     "bullmq": "^4.13.1",
