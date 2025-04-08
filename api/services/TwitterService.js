@@ -452,9 +452,10 @@ class TwitterService {
    * Cancel and remove a job
    * 
    * @param {string} jobId - ID of the job to cancel
-   * @returns {boolean} - Success status
+   * @param {boolean} force - Whether to force unlock and remove the job
+   * @returns {Object} - Operation result with success status and error information if applicable
    */
-  async cancelJob(jobId) {
+  async cancelJob(jobId, force = false) {
     // Try to find job in either queue
     let job = await this.queues.twitterScraper.getJob(jobId);
     let queueName = 'twitterScraper';
@@ -465,16 +466,74 @@ class TwitterService {
     }
     
     if (!job) {
-      return false;
+      return { success: false, error: 'Job not found' };
     }
     
-    // Remove the job
-    await job.remove();
-    
-    // Also try to clean up any in-progress resources
-    await this.redis.set(`cancel:${jobId}`, '1', 'EX', 3600); // signal to worker to cancel
-    
-    return true;
+    try {
+      // If force is true, we'll try to unlock the job first
+      if (force) {
+        // Get current job state to see if it's locked
+        const jobState = await job.getState();
+        this.fastify.log.info(`Attempting to force cancel job ${jobId} in state: ${jobState}`);
+        
+        // Make a direct Redis call to remove the lock
+        // The Redis key format that BullMQ uses for locks is: `bull:${queueName}:${jobId}:lock`
+        const lockKey = `bull:${queueName}:${jobId}:lock`;
+        const wasLocked = await this.redis.del(lockKey);
+        
+        if (wasLocked) {
+          this.fastify.log.info(`Successfully removed lock for job ${jobId}`);
+        }
+        
+        // Also try to clean up active job in case it's still in the active list
+        // BullMQ stores active jobs in a list with key: `bull:${queueName}:active`
+        try {
+          await this.redis.lrem(`bull:${queueName}:active`, 0, jobId);
+          this.fastify.log.info(`Removed job ${jobId} from active list`);
+        } catch (err) {
+          this.fastify.log.warn(`Could not remove job ${jobId} from active list: ${err.message}`);
+        }
+      }
+      
+      // Remove the job
+      await job.remove();
+      
+      // Also try to clean up any in-progress resources
+      await this.redis.set(`cancel:${jobId}`, '1', 'EX', 3600); // signal to worker to cancel
+      
+      // If we have an active pipeline, try to interrupt it
+      if (global.activePipelines && global.activePipelines[jobId]) {
+        try {
+          global.activePipelines[jobId].interrupt();
+          this.fastify.log.info(`Successfully interrupted pipeline for job ${jobId}`);
+          delete global.activePipelines[jobId];
+        } catch (err) {
+          this.fastify.log.error(`Failed to interrupt pipeline: ${err.message}`);
+        }
+      }
+      
+      return { success: true };
+    } catch (error) {
+      this.fastify.log.error(`Error cancelling job ${jobId}: ${error.message}`);
+      
+      // Don't throw, return error information instead
+      let errorMessage = error.message;
+      let errorType = 'unknown';
+      
+      if (error.message.includes("locked by another worker")) {
+        errorType = 'locked';
+        if (!force) {
+          this.fastify.log.warn(`Job ${jobId} is locked. Try with force=true parameter.`);
+        }
+      }
+      
+      return { 
+        success: false, 
+        error: errorMessage,
+        errorType,
+        needsForce: errorType === 'locked' && !force
+      };
+    }
   }
 
   /**
@@ -594,6 +653,256 @@ class TwitterService {
       maxId,
       totalTweets
     };
+  }
+
+  /**
+   * Identify stuck jobs that have been running for too long
+   * 
+   * @param {number} thresholdHours - Jobs running longer than this many hours are considered stuck (default: 24 hours)
+   * @returns {Object} - List of stuck jobs by queue
+   */
+  async identifyStuckJobs(thresholdHours = 24) {
+    const thresholdMs = thresholdHours * 60 * 60 * 1000;
+    const now = Date.now();
+    
+    // Get all active jobs from both queues
+    const twitterScraperActive = await this.queues.twitterScraper.getActive();
+    const tweetProcessorActive = await this.queues.tweetProcessor.getActive();
+    
+    // Filter for jobs that have been active for too long
+    const stuckTwitterJobs = twitterScraperActive.filter(job => {
+      // Check if job has been processing for longer than threshold
+      return job.processedOn && (now - job.processedOn) > thresholdMs;
+    });
+    
+    const stuckProcessorJobs = tweetProcessorActive.filter(job => {
+      return job.processedOn && (now - job.processedOn) > thresholdMs;
+    });
+    
+    // Also check for jobs that have been in "waiting" or "delayed" state for too long
+    // These could be jobs that the worker has crashed while processing
+    const waitingTwitterJobs = await this.queues.twitterScraper.getWaiting();
+    const delayedTwitterJobs = await this.queues.twitterScraper.getDelayed();
+    
+    // Filter for waiting/delayed jobs that are too old
+    const stuckWaitingTwitterJobs = waitingTwitterJobs.filter(job => {
+      // Check if job was created too long ago and has a high attempt count
+      return job.timestamp && (now - job.timestamp) > thresholdMs && job.attemptsMade > 2;
+    });
+    
+    const stuckDelayedTwitterJobs = delayedTwitterJobs.filter(job => {
+      return job.timestamp && (now - job.timestamp) > thresholdMs && job.attemptsMade > 2;
+    });
+    
+    // Combine all stuck Twitter jobs
+    const allStuckTwitterJobs = [...stuckTwitterJobs, ...stuckWaitingTwitterJobs, ...stuckDelayedTwitterJobs];
+    
+    // Get job states - we need to handle the awaits properly
+    const twitterScraperResults = await Promise.all(
+      allStuckTwitterJobs.map(async (job) => {
+        let state = 'unknown';
+        if (job.getState) {
+          try {
+            state = await job.getState();
+          } catch (err) {
+            this.fastify.log.error(`Error getting state for job ${job.id}: ${err.message}`);
+          }
+        }
+        
+        return {
+          id: job.id,
+          data: job.data,
+          state,
+          age: job.processedOn ? Math.round((now - job.processedOn) / (60 * 60 * 1000)) + ' hours' : 'unknown',
+          attempts: job.attemptsMade
+        };
+      })
+    );
+    
+    const tweetProcessorResults = await Promise.all(
+      stuckProcessorJobs.map(async (job) => {
+        let state = 'unknown';
+        if (job.getState) {
+          try {
+            state = await job.getState();
+          } catch (err) {
+            this.fastify.log.error(`Error getting state for job ${job.id}: ${err.message}`);
+          }
+        }
+        
+        return {
+          id: job.id,
+          data: job.data,
+          state,
+          age: job.processedOn ? Math.round((now - job.processedOn) / (60 * 60 * 1000)) + ' hours' : 'unknown',
+          attempts: job.attemptsMade
+        };
+      })
+    );
+    
+    return {
+      twitterScraper: twitterScraperResults,
+      tweetProcessor: tweetProcessorResults
+    };
+  }
+
+  /**
+   * Clean up stuck jobs
+   * 
+   * @param {number} thresholdHours - Jobs running longer than this many hours will be terminated
+   * @returns {Object} - Results of the cleanup operation
+   */
+  async cleanupStuckJobs(thresholdHours = 24) {
+    const stuckJobs = await this.identifyStuckJobs(thresholdHours);
+    const results = {
+      twitterScraper: { total: stuckJobs.twitterScraper.length, succeeded: 0, failed: 0, details: [] },
+      tweetProcessor: { total: stuckJobs.tweetProcessor.length, succeeded: 0, failed: 0, details: [] }
+    };
+    
+    // Process Twitter scraper jobs
+    for (const job of stuckJobs.twitterScraper) {
+      try {
+        this.fastify.log.warn(`Force terminating stuck job ${job.id} (${job.age} old, ${job.attempts} attempts)`);
+        
+        // Force terminate with our enhanced cancel method
+        const result = await this.cancelJob(job.id, true);
+        
+        if (result.success) {
+          results.twitterScraper.succeeded++;
+          results.twitterScraper.details.push({
+            id: job.id,
+            status: 'terminated',
+            message: `Successfully terminated job after ${job.age}`
+          });
+        } else {
+          results.twitterScraper.failed++;
+          results.twitterScraper.details.push({
+            id: job.id,
+            status: 'failed',
+            error: result.error
+          });
+          
+          // If the normal force cancel didn't work, try more aggressive Redis cleanup
+          await this.forceRemoveJobFromRedis('twitterScraper', job.id);
+        }
+      } catch (error) {
+        results.twitterScraper.failed++;
+        results.twitterScraper.details.push({
+          id: job.id,
+          status: 'error',
+          error: error.message
+        });
+      }
+    }
+    
+    // Process tweet processor jobs
+    for (const job of stuckJobs.tweetProcessor) {
+      try {
+        this.fastify.log.warn(`Force terminating stuck job ${job.id} (${job.age} old, ${job.attempts} attempts)`);
+        
+        const result = await this.cancelJob(job.id, true);
+        
+        if (result.success) {
+          results.tweetProcessor.succeeded++;
+          results.tweetProcessor.details.push({
+            id: job.id,
+            status: 'terminated',
+            message: `Successfully terminated job after ${job.age}`
+          });
+        } else {
+          results.tweetProcessor.failed++;
+          results.tweetProcessor.details.push({
+            id: job.id,
+            status: 'failed',
+            error: result.error
+          });
+          
+          // If the normal force cancel didn't work, try more aggressive Redis cleanup
+          await this.forceRemoveJobFromRedis('tweetProcessor', job.id);
+        }
+      } catch (error) {
+        results.tweetProcessor.failed++;
+        results.tweetProcessor.details.push({
+          id: job.id,
+          status: 'error',
+          error: error.message
+        });
+      }
+    }
+    
+    return results;
+  }
+  
+  /**
+   * Force remove a job from Redis using direct Redis commands
+   * This is a last resort when all other methods fail
+   * 
+   * @param {string} queueName - Name of the queue ('twitterScraper' or 'tweetProcessor')
+   * @param {string} jobId - ID of the job to remove
+   * @returns {boolean} - Whether the operation succeeded
+   */
+  async forceRemoveJobFromRedis(queueName, jobId) {
+    try {
+      // Convert our queue name to the actual Bull queue name
+      const bullQueueName = queueName === 'twitterScraper' ? 'twitter-scraper' : 'tweet-processor';
+      
+      // The key prefix in Redis
+      const prefix = `bull:${bullQueueName}:`;
+      
+      // Log what we're about to do
+      this.fastify.log.warn(`Performing aggressive Redis cleanup for job ${jobId} in queue ${bullQueueName}`);
+      
+      // Remove from all possible states in Redis
+      const keys = [
+        `${prefix}${jobId}`, // The job hash itself
+        `${prefix}${jobId}:lock`, // Job lock
+        `${prefix}active`, // Active set
+        `${prefix}wait`, // Waiting list
+        `${prefix}delayed`, // Delayed zset
+        `${prefix}failed`, // Failed set
+        `${prefix}stalled` // Stalled set
+      ];
+      
+      // Delete the job data
+      await this.redis.del(`${prefix}${jobId}`);
+      
+      // Remove lock if exists
+      await this.redis.del(`${prefix}${jobId}:lock`);
+      
+      // Remove from active list
+      await this.redis.lrem(`${prefix}active`, 0, jobId);
+      
+      // Remove from wait list
+      await this.redis.lrem(`${prefix}wait`, 0, jobId);
+      
+      // Remove from delayed zset
+      await this.redis.zrem(`${prefix}delayed`, jobId);
+      
+      // Remove from failed set
+      await this.redis.zrem(`${prefix}failed`, jobId);
+      
+      // Remove from stalled set
+      await this.redis.srem(`${prefix}stalled`, jobId);
+      
+      // Signal cancellation
+      await this.redis.set(`cancel:${jobId}`, '1', 'EX', 3600);
+      
+      // Remove from active pipelines if it exists
+      if (global.activePipelines && global.activePipelines[jobId]) {
+        try {
+          global.activePipelines[jobId].interrupt();
+          delete global.activePipelines[jobId];
+        } catch (err) {
+          this.fastify.log.error(`Failed to interrupt pipeline: ${err.message}`);
+        }
+      }
+      
+      this.fastify.log.info(`Successfully performed Redis cleanup for job ${jobId}`);
+      return true;
+    } catch (error) {
+      this.fastify.log.error(`Failed to clean up job ${jobId} from Redis: ${error.message}`);
+      return false;
+    }
   }
 }
 

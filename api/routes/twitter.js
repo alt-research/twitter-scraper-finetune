@@ -700,43 +700,105 @@ async function twitterRoutes(fastify, options) {
   // Cancel a job
   fastify.delete('/jobs/:id', {
     schema: {
-      description: 'Cancel a specific job by ID',
+      description: 'Cancel a specific job by ID. Use force=true to forcibly unlock and cancel jobs that are locked by another worker.',
       tags: ['jobs'],
       params: {
         type: 'object',
         properties: {
           id: { 
             type: 'string',
-            description: 'Job ID',
-            example: '123456'
+            description: 'Job ID to cancel',
+            example: 'twitter-elonmusk-1624578901234'
           }
         },
         required: ['id']
+      },
+      querystring: {
+        type: 'object',
+        properties: {
+          force: {
+            type: 'boolean',
+            description: 'Force cancel even if job is locked by another worker',
+            default: false,
+            example: true
+          }
+        }
       },
       response: {
         200: {
           description: 'Job cancelled successfully',
           type: 'object',
           properties: {
-            message: { type: 'string', example: 'Job 123456 has been cancelled' }
+            message: { 
+              type: 'string', 
+              description: 'Success message',
+              example: 'Job twitter-elonmusk-1624578901234 has been cancelled' 
+            }
+          }
+        },
+        400: {
+          description: 'Job locked or other client error',
+          type: 'object',
+          properties: {
+            error: { 
+              type: 'string', 
+              description: 'Error message',
+              example: 'Job twitter-elonmusk-1624578901234 could not be removed because it is locked by another worker' 
+            },
+            suggestion: { 
+              type: 'string', 
+              description: 'Suggested solution',
+              example: 'Use ?force=true to forcefully unlock and cancel the job' 
+            }
           }
         },
         404: {
           description: 'Job not found',
           type: 'object',
           properties: {
-            error: { type: 'string', example: 'Job not found' }
+            error: { 
+              type: 'string', 
+              description: 'Error message',
+              example: 'Job not found' 
+            }
+          }
+        },
+        500: {
+          description: 'Error cancelling job',
+          type: 'object',
+          properties: {
+            error: { 
+              type: 'string', 
+              description: 'Error message',
+              example: 'Error cancelling job: Unknown error occurred' 
+            }
           }
         }
       }
     }
   }, async (request, reply) => {
     const { id } = request.params;
-    const success = await twitterService.cancelJob(id);
+    const { force = false } = request.query;
     
-    if (!success) {
-      reply.code(404);
-      return { error: 'Job not found' };
+    const result = await twitterService.cancelJob(id, force);
+    
+    if (!result.success) {
+      // Handle different error cases
+      if (result.error === 'Job not found') {
+        reply.code(404);
+        return { error: 'Job not found' };
+      } else if (result.errorType === 'locked' && result.needsForce) {
+        // Job is locked and force wasn't used
+        reply.code(400);
+        return { 
+          error: `Job ${id} could not be removed because it is locked by another worker`,
+          suggestion: 'Use ?force=true to forcefully unlock and cancel the job'
+        };
+      } else {
+        // Generic error case
+        reply.code(500);
+        return { error: `Error cancelling job: ${result.error}` };
+      }
     }
     
     return {
@@ -950,6 +1012,225 @@ async function twitterRoutes(fastify, options) {
       fastify.log.error(`Failed to get tweets view ID range: ${error.message}`);
       reply.code(404);
       return { error: error.message };
+    }
+  });
+
+  // Get stuck jobs
+  fastify.get('/stuck-jobs', {
+    schema: {
+      description: 'Identify jobs that have been stuck for longer than the specified threshold',
+      tags: ['jobs', 'admin'],
+      querystring: {
+        type: 'object',
+        properties: {
+          hours: {
+            type: 'integer',
+            description: 'Jobs running longer than this many hours are considered stuck',
+            default: 24,
+            minimum: 1,
+            example: 24
+          }
+        }
+      },
+      response: {
+        200: {
+          description: 'List of stuck jobs',
+          type: 'object',
+          properties: {
+            twitterScraper: {
+              type: 'array',
+              description: 'Stuck jobs in the Twitter scraper queue',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', description: 'Job ID', example: 'twitter-username-1624578901234' },
+                  data: { 
+                    type: 'object', 
+                    description: 'Job data',
+                    additionalProperties: true,
+                    example: {
+                      username: 'elonmusk',
+                      operation: 'scrape-twitter-user'
+                    }
+                  },
+                  state: { type: 'string', description: 'Current job state', example: 'active' },
+                  age: { type: 'string', description: 'How long the job has been running', example: '26 hours' },
+                  attempts: { type: 'integer', description: 'Number of processing attempts', example: 3 }
+                }
+              }
+            },
+            tweetProcessor: {
+              type: 'array',
+              description: 'Stuck jobs in the tweet processor queue',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string', description: 'Job ID', example: 'process-username-analytics-1624578901234' },
+                  data: { 
+                    type: 'object', 
+                    description: 'Job data',
+                    additionalProperties: true,
+                    example: {
+                      username: 'elonmusk',
+                      action: 'generate-analytics'
+                    }
+                  },
+                  state: { type: 'string', description: 'Current job state', example: 'active' },
+                  age: { type: 'string', description: 'How long the job has been running', example: '26 hours' },
+                  attempts: { type: 'integer', description: 'Number of processing attempts', example: 3 }
+                }
+              }
+            }
+          }
+        },
+        500: {
+          description: 'Error identifying stuck jobs',
+          type: 'object',
+          properties: {
+            error: { 
+              type: 'string', 
+              description: 'Error message',
+              example: 'Failed to identify stuck jobs: Redis connection error'
+            }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { hours = 24 } = request.query;
+      const stuckJobs = await twitterService.identifyStuckJobs(parseInt(hours));
+      return stuckJobs;
+    } catch (error) {
+      fastify.log.error(`Failed to identify stuck jobs: ${error.message}`);
+      reply.code(500);
+      return { error: `Failed to identify stuck jobs: ${error.message}` };
+    }
+  });
+
+  // Clean up stuck jobs
+  fastify.post('/cleanup-stuck-jobs', {
+    schema: {
+      description: 'Force terminate and clean up jobs that have been stuck for longer than the specified threshold',
+      tags: ['jobs', 'admin'],
+      body: {
+        type: 'object',
+        properties: {
+          hours: {
+            type: 'integer',
+            description: 'Jobs running longer than this many hours will be terminated',
+            default: 24,
+            minimum: 1,
+            example: 24
+          },
+          dryRun: {
+            type: 'boolean',
+            description: 'If true, only identifies jobs but does not terminate them',
+            default: false,
+            example: true
+          }
+        }
+      },
+      response: {
+        200: {
+          description: 'Results of the cleanup operation',
+          type: 'object',
+          properties: {
+            twitterScraper: {
+              type: 'object',
+              properties: {
+                total: { type: 'integer', description: 'Total number of stuck jobs found', example: 3 },
+                succeeded: { type: 'integer', description: 'Number of jobs successfully terminated', example: 2 },
+                failed: { type: 'integer', description: 'Number of jobs that could not be terminated', example: 1 },
+                details: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string', description: 'Job ID', example: 'twitter-username-1624578901234' },
+                      status: { type: 'string', description: 'Termination status', example: 'terminated' },
+                      message: { type: 'string', description: 'Success message', example: 'Successfully terminated job after 26 hours' },
+                      error: { type: 'string', description: 'Error message if failed', example: 'Job could not be removed because it is locked' }
+                    }
+                  }
+                }
+              }
+            },
+            tweetProcessor: {
+              type: 'object',
+              properties: {
+                total: { type: 'integer', description: 'Total number of stuck jobs found', example: 1 },
+                succeeded: { type: 'integer', description: 'Number of jobs successfully terminated', example: 1 },
+                failed: { type: 'integer', description: 'Number of jobs that could not be terminated', example: 0 },
+                details: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'string', description: 'Job ID', example: 'process-username-analytics-1624578901234' },
+                      status: { type: 'string', description: 'Termination status', example: 'terminated' },
+                      message: { type: 'string', description: 'Success message', example: 'Successfully terminated job after 26 hours' },
+                      error: { type: 'string', description: 'Error message if failed', example: null }
+                    }
+                  }
+                }
+              }
+            },
+            dryRun: { type: 'boolean', description: 'Whether this was a dry run (no actual termination)', example: true }
+          }
+        },
+        500: {
+          description: 'Error cleaning up stuck jobs',
+          type: 'object',
+          properties: {
+            error: { 
+              type: 'string', 
+              description: 'Error message',
+              example: 'Failed to clean up stuck jobs: Redis connection error'
+            }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { hours = 24, dryRun = false } = request.body;
+      
+      if (dryRun) {
+        // Just identify the jobs but don't clean them up
+        const stuckJobs = await twitterService.identifyStuckJobs(parseInt(hours));
+        return {
+          twitterScraper: {
+            total: stuckJobs.twitterScraper.length,
+            succeeded: 0,
+            failed: 0,
+            details: stuckJobs.twitterScraper.map(job => ({
+              id: job.id,
+              status: 'identified',
+              message: `Job would be terminated (running for ${job.age})`
+            }))
+          },
+          tweetProcessor: {
+            total: stuckJobs.tweetProcessor.length,
+            succeeded: 0,
+            failed: 0,
+            details: stuckJobs.tweetProcessor.map(job => ({
+              id: job.id,
+              status: 'identified',
+              message: `Job would be terminated (running for ${job.age})`
+            }))
+          },
+          dryRun: true
+        };
+      }
+      
+      // Actually clean up the jobs
+      const results = await twitterService.cleanupStuckJobs(parseInt(hours));
+      return results;
+    } catch (error) {
+      fastify.log.error(`Failed to clean up stuck jobs: ${error.message}`);
+      reply.code(500);
+      return { error: `Failed to clean up stuck jobs: ${error.message}` };
     }
   });
 
