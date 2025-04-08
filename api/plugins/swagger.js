@@ -53,7 +53,9 @@ async function swaggerPlugin(fastify, options) {
         { name: 'processing', description: 'Endpoints for processing Twitter data' },
         { name: 'jobs', description: 'Endpoints for managing scraping and processing jobs' },
         { name: 'tweets', description: 'Endpoints for retrieving scraped tweets' },
-        { name: 'analytics', description: 'Endpoints for retrieving tweet analytics' }
+        { name: 'analytics', description: 'Endpoints for retrieving tweet analytics' },
+        { name: 'admin', description: 'Administrative endpoints for system management' },
+        { name: 'logs', description: 'Log file management endpoints' }
       ]
     }
   });

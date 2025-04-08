@@ -643,6 +643,72 @@ async function queuePlugin(fastify, options) {
       }
     });
   }
+
+  // Set up automatic cleanup for stuck jobs
+  let cleanupInterval = null;
+  
+  // Read environment variables for cleanup settings
+  const enableAutoCleanup = process.env.ENABLE_AUTO_JOB_CLEANUP === 'true';
+  const cleanupIntervalHours = parseInt(process.env.JOB_CLEANUP_INTERVAL_HOURS) || 12; // Default: check every 12 hours
+  const stuckJobThresholdHours = parseInt(process.env.STUCK_JOB_THRESHOLD_HOURS) || 24; // Default: jobs stuck for 24+ hours
+  
+  if (enableAutoCleanup) {
+    fastify.log.info(`Setting up automatic job cleanup to run every ${cleanupIntervalHours} hours for jobs stuck for ${stuckJobThresholdHours}+ hours`);
+    
+    // Convert to milliseconds
+    const intervalMs = cleanupIntervalHours * 60 * 60 * 1000;
+    
+    // Define the cleanup function
+    const cleanupStuckJobs = async () => {
+      try {
+        fastify.log.info(`Running scheduled cleanup of stuck jobs (threshold: ${stuckJobThresholdHours} hours)`);
+        
+        // We need to initialize the service here since it won't be available directly
+        const TwitterService = (await import('../services/TwitterService.js')).default;
+        const twitterService = new TwitterService(fastify);
+        
+        // Identify stuck jobs
+        const stuckJobs = await twitterService.identifyStuckJobs(stuckJobThresholdHours);
+        const totalStuckJobs = stuckJobs.twitterScraper.length + stuckJobs.tweetProcessor.length;
+        
+        if (totalStuckJobs === 0) {
+          fastify.log.info('No stuck jobs found during scheduled cleanup');
+          return;
+        }
+        
+        fastify.log.warn(`Found ${totalStuckJobs} stuck jobs during scheduled cleanup - attempting to terminate them`);
+        
+        // Perform the cleanup
+        const results = await twitterService.cleanupStuckJobs(stuckJobThresholdHours);
+        
+        // Log the results
+        const totalSuccess = results.twitterScraper.succeeded + results.tweetProcessor.succeeded;
+        const totalFailed = results.twitterScraper.failed + results.tweetProcessor.failed;
+        
+        fastify.log.info(`Scheduled cleanup completed: ${totalSuccess} jobs terminated, ${totalFailed} jobs failed to terminate`);
+      } catch (error) {
+        fastify.log.error(`Error during scheduled job cleanup: ${error.message}`);
+      }
+    };
+    
+    // Run cleanup immediately on startup (after a short delay to ensure everything is initialized)
+    setTimeout(() => {
+      cleanupStuckJobs().catch(err => {
+        fastify.log.error(`Failed to run initial job cleanup: ${err.message}`);
+      });
+    }, 60000); // 1 minute delay on startup
+    
+    // Set up the recurring interval
+    cleanupInterval = setInterval(cleanupStuckJobs, intervalMs);
+    
+    // Keep track of the interval to clean it up on shutdown
+    fastify.addHook('onClose', async (instance) => {
+      if (cleanupInterval) {
+        clearInterval(cleanupInterval);
+        fastify.log.info('Cleared job cleanup interval');
+      }
+    });
+  }
 }
 
 /**
